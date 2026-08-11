@@ -8,6 +8,7 @@ static NSString* const kWFSFastAuthEndpoint = @"https://auth.itunes.apple.com/au
 static NSString* const kWFSLegacyAuthEndpoint = @"https://buy.itunes.apple.com/WebObjects/MZFinance.woa/wa/authenticate";
 static NSString* const kWFSInitBagEndpoint = @"https://init.itunes.apple.com/bag.xml?guid=%@";
 static NSString* const kWFSBuyHost = @"buy.itunes.apple.com";
+static NSString* const kWFSRedownloadEndpoint = @"https://downloaddispatch.itunes.apple.com/r/redownload";
 
 static const NSInteger kWFSMaxRedirects = 5;
 static const NSInteger kWFSMaxAuthAttempts = 24;
@@ -167,6 +168,150 @@ static const NSInteger kWFSMaxAuthAttempts = 24;
 		}
 		[self finishDownloadInfo:completion url:url metadata:[self metadataFromSong:song] error:nil];
 	}];
+}
+
+- (void)searchPurchaseHistoryForBundleID:(NSString*)bundleID completion:(WFSAppleIDPurchaseSearchCompletion)completion
+{
+	if (!self.authenticated)
+	{
+		[self finishPurchaseSearch:completion purchase:nil error:[self errorWithCode:WFSAppleIDDownloaderErrorNotAuthenticated message:@"Not signed in to Apple ID."]];
+		return;
+	}
+	if (bundleID.length == 0)
+	{
+		[self finishPurchaseSearch:completion purchase:nil error:[self errorWithCode:WFSAppleIDDownloaderErrorInvalidResponse message:@"Bundle ID is required."]];
+		return;
+	}
+	[self volumeStoreDownloadHistoryWithCompletion:^(NSArray* purchases, NSDictionary* response, NSError* error)
+	{
+		if (error)
+		{
+			[self finishPurchaseSearch:completion purchase:nil error:error];
+			return;
+		}
+		NSDictionary* match = nil;
+		for (NSDictionary* purchase in purchases)
+		{
+			NSString* candidateBundleID = [self stringForKey:@"bundleId" in:purchase];
+			if (candidateBundleID.length && [candidateBundleID caseInsensitiveCompare:bundleID] == NSOrderedSame)
+			{
+				match = purchase;
+				break;
+			}
+		}
+		if (!match)
+		{
+			[self finishPurchaseSearch:completion purchase:nil error:[self errorWithCode:WFSAppleIDDownloaderErrorLicenseNotFound message:[NSString stringWithFormat:@"No purchase found for bundle ID %@ in this Apple ID's history.", bundleID]]];
+			return;
+		}
+		[self finishPurchaseSearch:completion purchase:match error:nil];
+	}];
+}
+
+- (void)volumeStoreDownloadHistoryWithCompletion:(void (^)(NSArray* purchases, NSDictionary* response, NSError* error))completion
+{
+	NSDictionary* body = @{
+		@"guid": self.guid,
+		@"creditDisplay": @"",
+	};
+	NSString* urlString = [NSString stringWithFormat:@"https://%@/WebObjects/MZFinance.woa/wa/volumeStoreDownloadHistory?guid=%@", [self buyHost], self.guid];
+	[self postPlist:body toURL:[NSURL URLWithString:urlString] contentType:@"application/x-apple-plist" authenticated:YES completion:^(NSData* data, NSHTTPURLResponse* response, NSError* error)
+	{
+		if (error)
+		{
+			completion(nil, nil, [self networkError:error]);
+			return;
+		}
+		[self writeDebugLog:[NSString stringWithFormat:@"volumeStoreDownloadHistory -> HTTP %ld (%lu bytes)", (long)response.statusCode, (unsigned long)data.length]];
+		[self writeRawResponseData:data label:@"history"];
+		if (response.statusCode == 429)
+		{
+			completion(nil, nil, [self errorWithCode:WFSAppleIDDownloaderErrorRateLimited message:@"Apple is rate limiting requests. Wait a few minutes and try again."]);
+			return;
+		}
+		NSDictionary* dict = [self parsePlistResponse:data];
+		if (!dict)
+		{
+			completion(nil, nil, [self errorWithCode:WFSAppleIDDownloaderErrorInvalidResponse message:@"Apple returned an invalid response to the purchase history request."]);
+			return;
+		}
+		NSArray* songList = dict[@"songList"];
+		NSMutableArray* purchases = [NSMutableArray array];
+		if ([songList isKindOfClass:[NSArray class]])
+		{
+			for (id entry in songList)
+			{
+				NSDictionary* purchase = [self purchaseFromHistoryEntry:entry];
+				if (purchase)
+				{
+					[purchases addObject:purchase];
+				}
+			}
+		}
+		[self writeDebugLog:[NSString stringWithFormat:@"volumeStoreDownloadHistory -> %lu purchase(s) parsed", (unsigned long)purchases.count]];
+		completion(purchases, dict, nil);
+	}];
+}
+
+- (NSDictionary*)purchaseFromHistoryEntry:(id)entry
+{
+	if (![entry isKindOfClass:[NSDictionary class]])
+	{
+		return nil;
+	}
+	NSDictionary* dict = (NSDictionary*)entry;
+	NSDictionary* metadata = dict[@"metadata"];
+	if (![metadata isKindOfClass:[NSDictionary class]])
+	{
+		metadata = nil;
+	}
+	NSString* bundleId = [self stringForKey:@"softwareVersionBundleId" in:metadata];
+	if (!bundleId.length)
+	{
+		bundleId = [self stringForKey:@"bundleId" in:dict];
+	}
+	NSString* adamId = [self stringForKey:@"itemId" in:dict];
+	if (!adamId.length)
+	{
+		adamId = [self stringForKey:@"songId" in:dict];
+	}
+	if (!adamId.length)
+	{
+		adamId = [self stringForKey:@"adamId" in:metadata];
+	}
+	if (!adamId.length)
+	{
+		return nil;
+	}
+	NSMutableDictionary* purchase = [NSMutableDictionary dictionary];
+	purchase[@"adamId"] = adamId;
+	if (bundleId.length)
+	{
+		purchase[@"bundleId"] = bundleId;
+	}
+	NSString* title = [self stringForKey:@"title" in:metadata];
+	if (!title.length)
+	{
+		title = [self stringForKey:@"title" in:dict];
+	}
+	if (title.length)
+	{
+		purchase[@"title"] = title;
+	}
+	NSString* purchaseDate = [self stringForKey:@"purchaseDate" in:dict];
+	if (!purchaseDate.length)
+	{
+		purchaseDate = [self stringForKey:@"purchaseDate" in:metadata];
+	}
+	if (purchaseDate.length)
+	{
+		purchase[@"purchaseDate"] = purchaseDate;
+	}
+	if (metadata)
+	{
+		purchase[@"metadata"] = metadata;
+	}
+	return purchase;
 }
 
 #pragma mark - Authentication
@@ -381,23 +526,87 @@ static const NSInteger kWFSMaxAuthAttempts = 24;
 	body[@"creditDisplay"] = @"";
 	body[@"guid"] = self.guid;
 	body[@"salableAdamId"] = [NSString stringWithFormat:@"%lld", appId];
+	body[@"serialNumber"] = @"0";
 	if (versionId > 0)
 	{
-		body[@"externalVersionId"] = [NSString stringWithFormat:@"%lld", versionId];
+		body[@"appExtVrsId"] = [NSString stringWithFormat:@"%lld", versionId];
+		body[@"extVrsId"] = [NSString stringWithFormat:@"%lld", versionId];
 	}
 	NSString* urlString = [NSString stringWithFormat:@"https://%@/WebObjects/MZFinance.woa/wa/volumeStoreDownloadProduct?guid=%@", [self buyHost], self.guid];
-	[self postPlist:body toURL:[NSURL URLWithString:urlString] contentType:@"application/x-www-form-urlencoded" authenticated:YES completion:^(NSData* data, NSHTTPURLResponse* response, NSError* error)
+	[self postPlist:body toURL:[NSURL URLWithString:urlString] contentType:@"application/x-apple-plist" authenticated:YES completion:^(NSData* data, NSHTTPURLResponse* response, NSError* error)
 	{
 		if (error)
 		{
 			completion(nil, nil, [self networkError:error]);
 			return;
 		}
+		[self writeDebugLog:[NSString stringWithFormat:@"volumeStoreDownloadProduct(appId=%lld, versionId=%lld) -> HTTP %ld (%lu bytes)", appId, versionId, (long)response.statusCode, (unsigned long)data.length]];
+		[self writeRawResponseData:data label:@"downloadProduct"];
 		if (response.statusCode == 429)
 		{
 			completion(nil, nil, [self errorWithCode:WFSAppleIDDownloaderErrorRateLimited message:@"Apple is rate limiting requests. Wait a few minutes and try again."]);
 			return;
 		}
+		NSDictionary* dict = [self parsePlistResponse:data];
+		if (!dict)
+		{
+			completion(nil, nil, [self errorWithCode:WFSAppleIDDownloaderErrorInvalidResponse message:@"Apple returned an invalid response."]);
+			return;
+		}
+		NSError* failureError = [self failureErrorFromResponse:dict];
+		if (failureError)
+		{
+			NSString* failureType = [self stringForKey:@"failureType" in:dict];
+			if ([failureType isEqualToString:@"5002"])
+			{
+				[self writeDebugLog:@"failureType 5002 detected, falling back to redownload endpoint"];
+				[self redownloadForAppId:appId versionId:versionId completion:completion];
+				return;
+			}
+			completion(nil, dict, failureError);
+			return;
+		}
+		NSArray* songList = dict[@"songList"];
+		NSDictionary* song = nil;
+		if ([songList isKindOfClass:[NSArray class]] && songList.count > 0)
+		{
+			song = songList[0];
+		}
+		if (![song isKindOfClass:[NSDictionary class]])
+		{
+			completion(nil, dict, [self errorWithCode:WFSAppleIDDownloaderErrorNoSong message:@"Apple did not return download information for this app."]);
+			return;
+		}
+		completion(song, dict, nil);
+	}];
+}
+
+- (void)redownloadForAppId:(long long)appId versionId:(long long)versionId completion:(void (^)(NSDictionary* song, NSDictionary* response, NSError* error))completion
+{
+	NSMutableURLRequest* request = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:[NSString stringWithFormat:@"%@?appExtVrsId=%lld&guid=%@", kWFSRedownloadEndpoint, versionId, self.guid]]];
+	[request setValue:kWFSConfiguratorUA forHTTPHeaderField:@"User-Agent"];
+	if (self.dsid.length)
+	{
+		[request setValue:self.dsid forHTTPHeaderField:@"X-Dsid"];
+		[request setValue:self.dsid forHTTPHeaderField:@"iCloud-Dsid"];
+	}
+	if (self.token.length)
+	{
+		[request setValue:self.token forHTTPHeaderField:@"X-Token"];
+	}
+	if (self.storeFront.length)
+	{
+		[request setValue:self.storeFront forHTTPHeaderField:@"X-Apple-Store-Front"];
+	}
+	[[self.session dataTaskWithRequest:request completionHandler:^(NSData* data, NSURLResponse* response, NSError* error)
+	{
+		if (error)
+		{
+			completion(nil, nil, [self networkError:error]);
+			return;
+		}
+		[self writeDebugLog:[NSString stringWithFormat:@"redownload(appId=%lld, versionId=%lld) -> HTTP %ld (%lu bytes)", appId, versionId, (long)((NSHTTPURLResponse*)response).statusCode, (unsigned long)data.length]];
+		[self writeRawResponseData:data label:@"redownload"];
 		NSDictionary* dict = [self parsePlistResponse:data];
 		if (!dict)
 		{
@@ -422,7 +631,7 @@ static const NSInteger kWFSMaxAuthAttempts = 24;
 			return;
 		}
 		completion(song, dict, nil);
-	}];
+	}] resume];
 }
 
 - (void)buyProductForAppId:(long long)appId completion:(void (^)(NSError* error))completion
@@ -528,7 +737,7 @@ static const NSInteger kWFSMaxAuthAttempts = 24;
 	request.HTTPMethod = @"POST";
 	[request setValue:kWFSConfiguratorUA forHTTPHeaderField:@"User-Agent"];
 	[request setValue:contentType forHTTPHeaderField:@"Content-Type"];
-	if ([contentType isEqualToString:@"application/x-www-form-urlencoded"])
+	if ([contentType isEqualToString:@"application/x-www-form-urlencoded"] || [contentType isEqualToString:@"application/x-apple-plist"])
 	{
 		[request setValue:@"*/*" forHTTPHeaderField:@"Accept"];
 	}
@@ -716,6 +925,27 @@ static const NSInteger kWFSMaxAuthAttempts = 24;
 	return [NSError errorWithDomain:WFSAppleIDDownloaderErrorDomain code:WFSAppleIDDownloaderErrorNetwork userInfo:@{NSLocalizedDescriptionKey: error.localizedDescription ?: @"Network error.", NSUnderlyingErrorKey: error}];
 }
 
+- (void)writeDebugLog:(NSString*)message
+{
+	NSString* directory = [NSHomeDirectory() stringByAppendingPathComponent:@"Documents"];
+	NSString* path = [directory stringByAppendingPathComponent:@"WaffleStore_store.log"];
+	NSString* line = [NSString stringWithFormat:@"%@ %@\n", [NSDate date], message];
+	NSString* existing = [NSString stringWithContentsOfFile:path encoding:NSUTF8StringEncoding error:nil];
+	NSString* contents = existing ? [existing stringByAppendingString:line] : line;
+	[contents writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:nil];
+}
+
+- (void)writeRawResponseData:(NSData*)data label:(NSString*)label
+{
+	if (!data.length)
+	{
+		return;
+	}
+	NSString* directory = [NSHomeDirectory() stringByAppendingPathComponent:@"Documents"];
+	NSString* path = [directory stringByAppendingPathComponent:[NSString stringWithFormat:@"WaffleStore_%@_resp.plist", label]];
+	[data writeToFile:path atomically:YES];
+}
+
 - (void)resetSessionState
 {
 	self.authenticated = NO;
@@ -738,6 +968,14 @@ static const NSInteger kWFSMaxAuthAttempts = 24;
 	dispatch_async(dispatch_get_main_queue(), ^
 	{
 		completion(url, metadata, error);
+	});
+}
+
+- (void)finishPurchaseSearch:(WFSAppleIDPurchaseSearchCompletion)completion purchase:(NSDictionary*)purchase error:(NSError*)error
+{
+	dispatch_async(dispatch_get_main_queue(), ^
+	{
+		completion(purchase, error);
 	});
 }
 

@@ -1,6 +1,7 @@
 #import "WFSPurchasedAppsViewController.h"
 #import "WFSAppleStore.h"
 #import "WFSDevicePurchaseScanner.h"
+#import "WFSAppleIDDownloader.h"
 #import "CoreServices.h"
 
 static dispatch_queue_t WFSMergeQueue(void)
@@ -16,6 +17,7 @@ static dispatch_queue_t WFSMergeQueue(void)
 
 @interface WFSPurchasedAppsViewController ()
 @property (nonatomic, copy) void (^selectionHandler)(long long appId, NSDictionary* metadataPlist);
+@property (nonatomic, copy, nullable) void (^appleIDSignInHandler)(void (^completion)(BOOL success));
 @property (nonatomic, strong) NSMutableArray* allApps;
 @property (nonatomic, strong) NSMutableArray* visibleApps;
 @property (nonatomic, strong) NSMutableDictionary* storeInfo;
@@ -30,6 +32,7 @@ static dispatch_queue_t WFSMergeQueue(void)
 @property (nonatomic, assign) BOOL loading;
 @property (nonatomic, assign) BOOL didAppear;
 @property (nonatomic, assign) BOOL didLoadHistory;
+@property (nonatomic, strong) UIAlertController* resolvingAlert;
 @end
 
 static NSString* const WFSPurchasedCellIdentifier = @"WFSPurchasedCellIdentifier";
@@ -525,15 +528,86 @@ static NSString* const WFSPurchasedCellIdentifier = @"WFSPurchasedCellIdentifier
 	[self showResolvingIndicatorForInput:input];
 	[self lookupStoreIDForBundleID:bundleID completion:^(long long resolvedAppId)
 	{
-		[self dismissViewControllerAnimated:NO completion:nil];
 		if (resolvedAppId > 0)
 		{
+			[self dismissResolvingIndicator];
 			[self startDownloadFlowForAppId:resolvedAppId];
+			return;
 		}
-		else
+		[self resolveBundleIDInAppleIDHistory:bundleID];
+	}];
+}
+
+- (void)resolveBundleIDInAppleIDHistory:(NSString*)bundleID
+{
+	WFSAppleIDDownloader* downloader = [WFSAppleIDDownloader sharedDownloader];
+	if (downloader.isAuthenticated)
+	{
+		[self searchAppleIDHistoryForBundleID:bundleID];
+		return;
+	}
+	[self dismissResolvingIndicator];
+	if (!self.appleIDSignInHandler)
+	{
+		[self showAddError:@"No App Store app found for that Bundle ID, and sign-in is not available in this build. Check the spelling and try again."];
+		return;
+	}
+	UIAlertController* alert = [UIAlertController alertControllerWithTitle:@"Not Found in App Store" message:[NSString stringWithFormat:@"\"%@\" is not listed in the App Store. If you purchased it, WaffleStore can look it up in your Apple ID purchase history — sign in to check.", bundleID] preferredStyle:UIAlertControllerStyleAlert];
+	UIAlertAction* signInAction = [UIAlertAction actionWithTitle:@"Sign In" style:UIAlertActionStyleDefault handler:^(UIAlertAction* action)
+	{
+		[self dismissViewControllerAnimated:NO completion:^
 		{
-			[self showAddError:@"No App Store app found for that Bundle ID. Check the spelling and try again."];
+			self.appleIDSignInHandler(^(BOOL success)
+			{
+				if (success)
+				{
+					[self searchAppleIDHistoryForBundleID:bundleID];
+					return;
+				}
+				[self showAddError:[NSString stringWithFormat:@"Sign-in failed. \"%@\" could not be resolved.", bundleID]];
+			});
+		}];
+	}];
+	[alert addAction:signInAction];
+	UIAlertAction* cancelAction = [UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil];
+	[alert addAction:cancelAction];
+	[self presentViewController:alert animated:YES completion:nil];
+}
+
+- (void)searchAppleIDHistoryForBundleID:(NSString*)bundleID
+{
+	[self showResolvingIndicatorForInput:bundleID];
+	WFSAppleIDDownloader* downloader = [WFSAppleIDDownloader sharedDownloader];
+	[downloader searchPurchaseHistoryForBundleID:bundleID completion:^(NSDictionary* purchase, NSError* error)
+	{
+		[self dismissResolvingIndicator];
+		if (error)
+		{
+			if (error.code == WFSAppleIDDownloaderErrorLicenseNotFound)
+			{
+				[self showAddError:[NSString stringWithFormat:@"\"%@\" is not listed in the App Store and was not found in your Apple ID purchase history.", bundleID]];
+				return;
+			}
+			[self showAddError:error.localizedDescription];
+			return;
 		}
+		long long adamId = [purchase[@"adamId"] longLongValue];
+		if (adamId <= 0)
+		{
+			[self showAddError:@"The app was found in your purchase history but its App ID could not be determined."];
+			return;
+		}
+		NSMutableDictionary* metadata = [NSMutableDictionary dictionary];
+		NSString* title = purchase[@"title"];
+		if (title.length)
+		{
+			metadata[@"title"] = title;
+		}
+		if ([purchase[@"metadata"] isKindOfClass:[NSDictionary class]])
+		{
+			[metadata addEntriesFromDictionary:purchase[@"metadata"]];
+		}
+		[self startDownloadFlowForAppId:adamId metadata:metadata];
 	}];
 }
 
@@ -575,8 +649,13 @@ static NSString* const WFSPurchasedCellIdentifier = @"WFSPurchasedCellIdentifier
 		completion(0);
 		return;
 	}
-	NSURLSessionDataTask* task = [[NSURLSession sharedSession] dataTaskWithURL:url completionHandler:^(NSData* data, NSURLResponse* response, NSError* error)
+	NSURLSessionConfiguration* config = [NSURLSessionConfiguration defaultSessionConfiguration];
+	config.timeoutIntervalForRequest = 15;
+	config.timeoutIntervalForResource = 20;
+	NSURLSession* session = [NSURLSession sessionWithConfiguration:config];
+	NSURLSessionDataTask* task = [session dataTaskWithURL:url completionHandler:^(NSData* data, NSURLResponse* response, NSError* error)
 	{
+		[session finishTasksAndInvalidate];
 		long long trackId = 0;
 		if (!error && data.length)
 		{
@@ -604,19 +683,35 @@ static NSString* const WFSPurchasedCellIdentifier = @"WFSPurchasedCellIdentifier
 
 - (void)showResolvingIndicatorForInput:(NSString*)input
 {
-	UIAlertController* alert = [UIAlertController alertControllerWithTitle:@"Resolving" message:[NSString stringWithFormat:@"Looking up \"%@\" in the App Store…", input] preferredStyle:UIAlertControllerStyleAlert];
-	[self presentViewController:alert animated:YES completion:nil];
-	dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(12 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^
+	if (self.presentedViewController)
 	{
-		[alert dismissViewControllerAnimated:YES completion:nil];
-	});
+		[self dismissViewControllerAnimated:NO completion:nil];
+	}
+	UIAlertController* alert = [UIAlertController alertControllerWithTitle:@"Resolving" message:[NSString stringWithFormat:@"Looking up \"%@\"…", input] preferredStyle:UIAlertControllerStyleAlert];
+	[self presentViewController:alert animated:YES completion:nil];
+	self.resolvingAlert = alert;
+}
+
+- (void)dismissResolvingIndicator
+{
+	if (self.resolvingAlert)
+	{
+		UIAlertController* alert = self.resolvingAlert;
+		self.resolvingAlert = nil;
+		[alert dismissViewControllerAnimated:NO completion:nil];
+	}
 }
 
 - (void)startDownloadFlowForAppId:(long long)appId
 {
+	[self startDownloadFlowForAppId:appId metadata:nil];
+}
+
+- (void)startDownloadFlowForAppId:(long long)appId metadata:(NSDictionary*)metadata
+{
 	if (self.selectionHandler)
 	{
-		self.selectionHandler(appId, nil);
+		self.selectionHandler(appId, metadata);
 	}
 }
 

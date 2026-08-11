@@ -7,5 +7,6 @@
 @property (nonatomic, weak) UIViewController* wfsPresentingViewController;
 
 - (void)getAllAppVersionIdsAndPrompt:(long long)appId metadataPlist:(NSDictionary*)metadataPlist;
+- (void)promptAppleIDCredentialsWithCompletion:(void (^)(BOOL success))completion;
 
 @end

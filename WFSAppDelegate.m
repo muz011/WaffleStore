@@ -26,6 +26,10 @@ static void WFSUncaughtExceptionHandler(NSException* exception)
 	{
 		[weakDowngradeViewController getAllAppVersionIdsAndPrompt:appId metadataPlist:metadataPlist];
 	}];
+	purchasesViewController.appleIDSignInHandler = ^(void (^completion)(BOOL success))
+	{
+		[weakDowngradeViewController promptAppleIDCredentialsWithCompletion:completion];
+	};
 	UINavigationController* purchasesNavigationController = [[UINavigationController alloc] initWithRootViewController:purchasesViewController];
 	purchasesNavigationController.tabBarItem = [[UITabBarItem alloc] initWithTitle:@"Purchased" image:[UIImage systemImageNamed:@"bag"] selectedImage:[UIImage systemImageNamed:@"bag.fill"]];
 

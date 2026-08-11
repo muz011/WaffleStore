@@ -21,6 +21,7 @@ typedef NS_ENUM(NSInteger, WFSAppleIDDownloaderErrorCode)
 typedef void (^WFSAppleIDAuthCompletion)(NSError* _Nullable error);
 typedef void (^WFSAppleIDVersionsCompletion)(NSArray* _Nullable versions, NSDictionary* _Nullable metadata, NSError* _Nullable error);
 typedef void (^WFSAppleIDDownloadInfoCompletion)(NSURL* _Nullable ipaURL, NSDictionary* _Nullable metadata, NSError* _Nullable error);
+typedef void (^WFSAppleIDPurchaseSearchCompletion)(NSDictionary* _Nullable purchase, NSError* _Nullable error);
 
 @interface WFSAppleIDDownloader : NSObject
 
@@ -35,6 +36,7 @@ typedef void (^WFSAppleIDDownloadInfoCompletion)(NSURL* _Nullable ipaURL, NSDict
 
 - (void)getVersionsForAppId:(long long)appId completion:(WFSAppleIDVersionsCompletion)completion;
 - (void)getDownloadInfoForAppId:(long long)appId versionId:(long long)versionId completion:(WFSAppleIDDownloadInfoCompletion)completion;
+- (void)searchPurchaseHistoryForBundleID:(NSString*)bundleID completion:(WFSAppleIDPurchaseSearchCompletion)completion;
 
 @end
 
