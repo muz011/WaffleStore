@@ -3,6 +3,7 @@
 #import "WFSAppleIDDownloader.h"
 #import "CoreServices.h"
 #import <SystemConfiguration/SystemConfiguration.h>
+#import <zlib.h>
 
 @interface SKUIItemStateCenter : NSObject
 
@@ -431,11 +432,240 @@
 	});
 }
 
+- (void)installLatestToUnlockVersionsForAppId:(long long)appId
+{
+	if (![self isNetworkReachable])
+	{
+		[self showAlert:@"No Internet" message:@"Please check your internet connection and try again."];
+		return;
+	}
+	dispatch_async(dispatch_get_main_queue(), ^
+	{
+		UIAlertController* confirmAlert = [UIAlertController alertControllerWithTitle:@"Download Latest Version" message:@"To unlock the full version list for downgrading, WaffleStore will download the latest version of this app with your Apple ID and read its metadata. You can then choose which version to install." preferredStyle:UIAlertControllerStyleAlert];
+		UIAlertAction* downloadAction = [UIAlertAction actionWithTitle:@"Download Latest" style:UIAlertActionStyleDefault handler:^(UIAlertAction* action)
+		{
+			WFSAppleIDDownloader* downloader = [WFSAppleIDDownloader sharedDownloader];
+			if (!downloader.isAuthenticated)
+			{
+				[self promptAppleIDCredentialsWithCompletion:^(BOOL success)
+				{
+					if (success)
+					{
+						[self downloadLatestForVersionListForAppId:appId];
+					}
+				}];
+				return;
+			}
+			[self downloadLatestForVersionListForAppId:appId];
+		}];
+		[confirmAlert addAction:downloadAction];
+		UIAlertAction* cancelAction = [UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil];
+		[confirmAlert addAction:cancelAction];
+		[self wfsPresentViewController:confirmAlert];
+	});
+}
+
+- (void)downloadLatestForVersionListForAppId:(long long)appId
+{
+	[self showDownloadProgressWithMessage:@"Getting download link from Apple…"];
+	[[WFSAppleIDDownloader sharedDownloader] getDownloadInfoForAppId:appId versionId:0 completion:^(NSURL* ipaURL, NSDictionary* metadata, NSError* error)
+	{
+		if (error)
+		{
+			[self dismissDownloadProgress];
+			if (error.code == WFSAppleIDDownloaderErrorLicenseNotFound)
+			{
+				[self showAlert:@"Not Purchased" message:[NSString stringWithFormat:@"%@\n\nApple only allows downloading apps that are free or that have been purchased with this Apple ID.", error.localizedDescription]];
+				return;
+			}
+			[self showAlert:@"Apple ID Error" message:error.localizedDescription];
+			return;
+		}
+		NSString* destination = [NSTemporaryDirectory() stringByAppendingPathComponent:[NSString stringWithFormat:@"wfs-latest-%lld.ipa", appId]];
+		NSMutableURLRequest* request = [NSMutableURLRequest requestWithURL:ipaURL];
+		[request setValue:@"Configurator/2.17 (Macintosh; OS X 15.2; 24C5089c) AppleWebKit/0620.1.16.11.6" forHTTPHeaderField:@"User-Agent"];
+		[self showDownloadProgressWithMessage:@"Downloading latest version…"];
+		NSURLSessionDownloadTask* task = [[NSURLSession sharedSession] downloadTaskWithRequest:request completionHandler:^(NSURL* location, NSURLResponse* response, NSError* downloadError)
+		{
+			dispatch_async(dispatch_get_main_queue(), ^
+			{
+				[self dismissDownloadProgress];
+				if (downloadError || !location)
+				{
+					[self showAlert:@"Download Failed" message:downloadError.localizedDescription ?: @"Unknown error."];
+					return;
+				}
+				[[NSFileManager defaultManager] removeItemAtPath:destination error:nil];
+				NSError* moveError = nil;
+				[[NSFileManager defaultManager] moveItemAtURL:location toURL:[NSURL fileURLWithPath:destination] error:&moveError];
+				if (moveError)
+				{
+					[self showAlert:@"Save Failed" message:moveError.localizedDescription];
+					return;
+				}
+				NSDictionary* metadataPlist = [self iTunesMetadataPlistFromIPAPath:destination];
+				NSArray* versionIds = metadataPlist ? [self versionIdsFromMetadataPlist:metadataPlist] : nil;
+				if (versionIds.count == 0)
+				{
+					[self showAlert:@"Version List Unavailable" message:@"Could not read the version list from the latest download. Falling back to Apple's version server."];
+					[self fetchAppleIDVersionsForAppId:appId];
+					return;
+				}
+				NSString* currentVersion = [metadata isKindOfClass:[NSDictionary class]] ? metadata[@"bundleShortVersionString"] : nil;
+				if (![currentVersion isKindOfClass:[NSString class]] || currentVersion.length == 0)
+				{
+					currentVersion = @"Latest";
+				}
+				NSMutableArray* list = [NSMutableArray arrayWithObject:@{@"external_identifier": @0, @"bundle_version": currentVersion}];
+				for (NSNumber* versionId in [[versionIds reverseObjectEnumerator] allObjects])
+				{
+					[list addObject:@{@"external_identifier": versionId, @"bundle_version": @""}];
+				}
+				[self presentVersionPickerWithVersions:list appId:appId completion:^(NSDictionary* selectedVersion)
+				{
+					long long versionId = [selectedVersion[@"external_identifier"] longLongValue];
+					[self promptDownloadMethodForAppId:appId versionId:versionId metadata:metadata];
+				}];
+			});
+		}];
+		[task resume];
+	}];
+}
+
+- (NSDictionary*)iTunesMetadataPlistFromIPAPath:(NSString*)path
+{
+	NSData* zipData = [NSData dataWithContentsOfFile:path];
+	if (!zipData.length)
+	{
+		return nil;
+	}
+	NSData* plistData = [self extractITunesMetadataFromZipData:zipData];
+	if (!plistData.length)
+	{
+		return nil;
+	}
+	NSError* plistError = nil;
+	NSDictionary* plist = [NSPropertyListSerialization propertyListWithData:plistData options:0 format:NULL error:&plistError];
+	if (plistError || ![plist isKindOfClass:[NSDictionary class]])
+	{
+		return nil;
+	}
+	return plist;
+}
+
+- (NSData*)extractITunesMetadataFromZipData:(NSData*)zipData
+{
+	const uint8_t* bytes = zipData.bytes;
+	NSUInteger length = zipData.length;
+	if (length < 22)
+	{
+		return nil;
+	}
+	NSUInteger eocdPos = NSNotFound;
+	NSUInteger scanStart = length > 65557 ? length - 65557 : 0;
+	for (NSUInteger i = length - 22; i >= scanStart && i != NSUIntegerMax; i--)
+	{
+		if (bytes[i] == 0x50 && bytes[i + 1] == 0x4B && bytes[i + 2] == 0x05 && bytes[i + 3] == 0x06)
+		{
+			eocdPos = i;
+			break;
+		}
+	}
+	if (eocdPos == NSNotFound)
+	{
+		return nil;
+	}
+	uint32_t cdOffset = bytes[eocdPos + 16] | (bytes[eocdPos + 17] << 8) | (bytes[eocdPos + 18] << 16) | ((uint32_t)bytes[eocdPos + 19] << 24);
+	uint16_t entryCount = bytes[eocdPos + 10] | (bytes[eocdPos + 11] << 8);
+	NSData* rootMatch = nil;
+	NSData* fallbackMatch = nil;
+	NSUInteger pos = cdOffset;
+	for (uint16_t e = 0; e < entryCount; e++)
+	{
+		if (pos + 46 > length || !(bytes[pos] == 0x50 && bytes[pos + 1] == 0x4B && bytes[pos + 2] == 0x01 && bytes[pos + 3] == 0x02))
+		{
+			break;
+		}
+		uint16_t method = bytes[pos + 10] | (bytes[pos + 11] << 8);
+		uint32_t compSize = bytes[pos + 20] | (bytes[pos + 21] << 8) | (bytes[pos + 22] << 16) | ((uint32_t)bytes[pos + 23] << 24);
+		uint32_t uncompSize = bytes[pos + 24] | (bytes[pos + 25] << 8) | (bytes[pos + 26] << 16) | ((uint32_t)bytes[pos + 27] << 24);
+		uint16_t nameLen = bytes[pos + 28] | (bytes[pos + 29] << 8);
+		uint16_t extraLen = bytes[pos + 30] | (bytes[pos + 31] << 8);
+		uint16_t commentLen = bytes[pos + 32] | (bytes[pos + 33] << 8);
+		uint32_t localOffset = bytes[pos + 42] | (bytes[pos + 43] << 8) | (bytes[pos + 44] << 16) | ((uint32_t)bytes[pos + 45] << 24);
+		if (pos + 46 + nameLen > length)
+		{
+			break;
+		}
+		NSString* name = [[NSString alloc] initWithBytes:bytes + pos + 46 length:nameLen encoding:NSUTF8StringEncoding];
+		pos += 46 + nameLen + extraLen + commentLen;
+		if (![name hasSuffix:@"/iTunesMetadata.plist"] && ![name isEqualToString:@"iTunesMetadata.plist"])
+		{
+			continue;
+		}
+		if (localOffset + 30 > length || !(bytes[localOffset] == 0x50 && bytes[localOffset + 1] == 0x4B && bytes[localOffset + 2] == 0x03 && bytes[localOffset + 3] == 0x04))
+		{
+			continue;
+		}
+		uint16_t lNameLen = bytes[localOffset + 26] | (bytes[localOffset + 27] << 8);
+		uint16_t lExtraLen = bytes[localOffset + 28] | (bytes[localOffset + 29] << 8);
+		NSUInteger dataStart = localOffset + 30 + lNameLen + lExtraLen;
+		if (dataStart + compSize > length)
+		{
+			continue;
+		}
+		NSData* entryData = [zipData subdataWithRange:NSMakeRange(dataStart, compSize)];
+		NSData* extracted = nil;
+		if (method == 0)
+		{
+			extracted = entryData;
+		}
+		else if (method == 8)
+		{
+			NSMutableData* outData = [NSMutableData dataWithLength:uncompSize];
+			z_stream stream;
+			memset(&stream, 0, sizeof(stream));
+			stream.next_in = (Bytef*)entryData.bytes;
+			stream.avail_in = (uInt)entryData.length;
+			stream.next_out = (Bytef*)outData.mutableBytes;
+			stream.avail_out = (uInt)outData.length;
+			if (inflateInit2(&stream, -MAX_WBITS) == Z_OK)
+			{
+				int result = inflate(&stream, Z_FINISH);
+				inflateEnd(&stream);
+				if (result == Z_STREAM_END)
+				{
+					extracted = outData;
+				}
+			}
+		}
+		if (!extracted)
+		{
+			continue;
+		}
+		if ([name isEqualToString:@"iTunesMetadata.plist"])
+		{
+			rootMatch = extracted;
+			break;
+		}
+		if (!fallbackMatch)
+		{
+			fallbackMatch = extracted;
+		}
+	}
+	return rootMatch ?: fallbackMatch;
+}
+
 - (void)getAllAppVersionIdsAndPrompt:(long long)appId metadataPlist:(NSDictionary*)metadataPlist
 {
 	dispatch_async(dispatch_get_main_queue(), ^
 	{
 		UIAlertController* promptAlert = [UIAlertController alertControllerWithTitle:@"Version Selection" message:@"Choose how to select the app version to download." preferredStyle:UIAlertControllerStyleAlert];
+		UIAlertAction* latestAction = [UIAlertAction actionWithTitle:@"Download Latest to Unlock Version List" style:UIAlertActionStyleDefault handler:^(UIAlertAction* action)
+		{
+			[self installLatestToUnlockVersionsForAppId:appId];
+		}];
+		[promptAlert addAction:latestAction];
 		if (metadataPlist && [self versionIdsFromMetadataPlist:metadataPlist].count > 0)
 		{
 			UIAlertAction* localAction = [UIAlertAction actionWithTitle:@"Use iTunesMetadata.plist" style:UIAlertActionStyleDefault handler:^(UIAlertAction* action)
