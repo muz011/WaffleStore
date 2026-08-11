@@ -19,6 +19,7 @@ static NSString* const kWFSBuyHost = @"buy.itunes.apple.com";
 @property (nonatomic, copy) NSString* storeFront;
 @property (nonatomic, copy) NSString* pod;
 @property (nonatomic, assign) BOOL authenticated;
+@property (nonatomic, copy, readwrite) NSString* authenticatedAppleId;
 @end
 
 @implementation WFSAppleIDDownloader
