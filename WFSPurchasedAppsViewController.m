@@ -398,7 +398,7 @@ static NSString* const WFSPurchasedCellIdentifier = @"WFSPurchasedCellIdentifier
 		}
 		NSMutableSet* localScanned = [NSMutableSet new];
 		NSArray* scanned = [WFSDevicePurchaseScanner scanPurchasesForDSID:dsid];
-		for (NSDictionary* entry in scanned)
+		for (__strong NSDictionary* entry in scanned)
 		{
 			NSNumber* storeID = entry[WFSDevicePurchaseStoreIDKey];
 			NSString* bundleID = entry[WFSDevicePurchaseBundleIDKey];
