@@ -27,6 +27,7 @@ static dispatch_queue_t WFSMergeQueue(void)
 @property (nonatomic, strong) UIActivityIndicatorView* spinner;
 @property (nonatomic, assign) BOOL loading;
 @property (nonatomic, assign) BOOL didAppear;
+@property (nonatomic, assign) BOOL didLoadHistory;
 @end
 
 static NSString* const WFSPurchasedCellIdentifier = @"WFSPurchasedCellIdentifier";
@@ -137,6 +138,7 @@ static NSString* const WFSPurchasedCellIdentifier = @"WFSPurchasedCellIdentifier
 		[self.refreshControl endRefreshing];
 		return;
 	}
+	self.didLoadHistory = NO;
 	@try
 	{
 		Class accountStoreClass = NSClassFromString(@"SSAccountStore");
@@ -204,6 +206,15 @@ static NSString* const WFSPurchasedCellIdentifier = @"WFSPurchasedCellIdentifier
 			return;
 		}
 		__weak typeof(self) weakSelf = self;
+		dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(30 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^
+		{
+			__strong typeof(weakSelf) self = weakSelf;
+			if (self.loading && !self.didLoadHistory)
+			{
+				[self setLoading:NO];
+				[self showError:@"Purchase History Unavailable" message:@"The App Store did not respond in time. Check your connection and try again."];
+			}
+		});
 		[history updateForAccountID:dsid withCompletionHandler:^(NSError* error)
 		{
 			@try
@@ -219,7 +230,10 @@ static NSString* const WFSPurchasedCellIdentifier = @"WFSPurchasedCellIdentifier
 					});
 					return;
 				}
-				[self runHistoryQueriesWithDSID:dsid];
+				dispatch_async(dispatch_get_main_queue(), ^
+				{
+					[self runHistoryQueriesWithDSID:dsid];
+				});
 			}
 			@catch (NSException* exception)
 			{
@@ -277,29 +291,32 @@ static NSString* const WFSPurchasedCellIdentifier = @"WFSPurchasedCellIdentifier
 			{
 				__strong typeof(weakSelf) self = weakSelf;
 				NSLog(@"[WaffleStore] Purchases: executeQuery(hidden=%lld) apps=%lu error=%@", hiddenValue, (unsigned long)apps.count, error);
-				if (!error)
+				dispatch_async(WFSMergeQueue(), ^
 				{
-					dispatch_sync(WFSMergeQueue(), ^
+					@try
 					{
-						for (ASDPurchaseHistoryApp* app in apps)
+						if (!error)
 						{
-							if (app.storeItemID > 0 && app.bundleID.length > 0)
+							for (ASDPurchaseHistoryApp* app in apps)
 							{
-								merged[@(app.storeItemID)] = app;
+								if (app.storeItemID > 0 && app.bundleID.length > 0)
+								{
+									merged[@(app.storeItemID)] = app;
+								}
 							}
 						}
-					});
-				}
-				pending--;
-				if (pending == 0)
-				{
-					__block NSArray* allApps = nil;
-					dispatch_sync(WFSMergeQueue(), ^
+					}
+					@catch (NSException* exception)
 					{
-						allApps = [merged allValues];
-					});
-					[self allHistoryLoaded:allApps];
-				}
+						NSLog(@"[WaffleStore] Purchases: merge exception %@ %@", exception.name, exception.reason);
+					}
+					pending--;
+					if (pending == 0)
+					{
+						NSArray* allApps = [merged allValues];
+						[self allHistoryLoaded:allApps];
+					}
+				});
 			}
 			@catch (NSException* exception)
 			{
@@ -315,6 +332,7 @@ static NSString* const WFSPurchasedCellIdentifier = @"WFSPurchasedCellIdentifier
 	dispatch_async(dispatch_get_main_queue(), ^
 	{
 		__strong typeof(weakSelf) self = weakSelf;
+		self.didLoadHistory = YES;
 		self.allApps = [[apps sortedArrayUsingComparator:^NSComparisonResult(ASDPurchaseHistoryApp* a, ASDPurchaseHistoryApp* b)
 		{
 			NSDate* dateA = a.datePurchased ?: [NSDate distantPast];
@@ -369,6 +387,7 @@ static NSString* const WFSPurchasedCellIdentifier = @"WFSPurchasedCellIdentifier
 		NSURLSessionDataTask* task = [[NSURLSession sharedSession] dataTaskWithURL:url completionHandler:^(NSData* data, NSURLResponse* response, NSError* error)
 		{
 			NSMutableSet* found = [NSMutableSet new];
+			NSMutableDictionary* foundInfo = [NSMutableDictionary new];
 			if (!error && data)
 			{
 				NSDictionary* json = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
@@ -378,15 +397,19 @@ static NSString* const WFSPurchasedCellIdentifier = @"WFSPurchasedCellIdentifier
 					if (trackId)
 					{
 						[found addObject:trackId];
-						weakSelf.storeInfo[trackId] = result;
+						foundInfo[trackId] = result;
 					}
 				}
 			}
 			dispatch_async(dispatch_get_main_queue(), ^
 			{
 				__strong typeof(weakSelf) self = weakSelf;
-				if (found.count > 0)
+				if (foundInfo.count > 0)
 				{
+					for (NSNumber* trackId in foundInfo)
+					{
+						self.storeInfo[trackId] = foundInfo[trackId];
+					}
 					for (NSNumber* appId in batch)
 					{
 						if (![found containsObject:appId])
