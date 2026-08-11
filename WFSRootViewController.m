@@ -431,26 +431,14 @@
 	});
 }
 
-- (void)downloadLatestWithAppleIDForAppId:(long long)appId
+- (void)downloadLatestForAppId:(long long)appId
 {
 	if (![self isNetworkReachable])
 	{
 		[self showAlert:@"No Internet" message:@"Please check your internet connection and try again."];
 		return;
 	}
-	WFSAppleIDDownloader* downloader = [WFSAppleIDDownloader sharedDownloader];
-	if (!downloader.isAuthenticated)
-	{
-		[self promptAppleIDCredentialsWithCompletion:^(BOOL success)
-		{
-			if (success)
-			{
-				[self downloadIPAForAppId:appId versionId:0];
-			}
-		}];
-		return;
-	}
-	[self downloadIPAForAppId:appId versionId:0];
+	[self downloadAppWithAppId:appId versionId:0];
 }
 
 - (void)getAllAppVersionIdsAndPrompt:(long long)appId metadataPlist:(NSDictionary*)metadataPlist
@@ -458,9 +446,9 @@
 	dispatch_async(dispatch_get_main_queue(), ^
 	{
 		UIAlertController* promptAlert = [UIAlertController alertControllerWithTitle:@"Version Selection" message:@"Choose how to select the app version to download." preferredStyle:UIAlertControllerStyleAlert];
-		UIAlertAction* latestAction = [UIAlertAction actionWithTitle:@"Download Latest with Apple ID" style:UIAlertActionStyleDefault handler:^(UIAlertAction* action)
+		UIAlertAction* latestAction = [UIAlertAction actionWithTitle:@"Download Latest" style:UIAlertActionStyleDefault handler:^(UIAlertAction* action)
 		{
-			[self downloadLatestWithAppleIDForAppId:appId];
+			[self downloadLatestForAppId:appId];
 		}];
 		[promptAlert addAction:latestAction];
 		if (metadataPlist && [self versionIdsFromMetadataPlist:metadataPlist].count > 0)
