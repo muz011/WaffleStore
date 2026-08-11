@@ -1,5 +1,6 @@
 #import "WFSRootViewController.h"
 #import "WFSVersionPickerViewController.h"
+#import "WFSAppleIDDownloader.h"
 #import "CoreServices.h"
 #import <SystemConfiguration/SystemConfiguration.h>
 
@@ -51,6 +52,12 @@
 		[downloadSpecifier setProperty:@YES forKey:@"enabled"];
 		downloadSpecifier.buttonAction = @selector(downloadApp);
 		[_specifiers addObject:downloadSpecifier];
+
+		PSSpecifier* appleIdDownloadSpecifier = [PSSpecifier preferenceSpecifierNamed:@"Download with Apple ID" target:self set:nil get:nil detail:nil cell:PSButtonCell edit:nil];
+		appleIdDownloadSpecifier.identifier = @"appleIdDownload";
+		[appleIdDownloadSpecifier setProperty:@YES forKey:@"enabled"];
+		appleIdDownloadSpecifier.buttonAction = @selector(downloadAppWithAppleID);
+		[_specifiers addObject:appleIdDownloadSpecifier];
 
 		NSString* aboutText = [self getAboutText];
 		[downloadGroupSpecifier setProperty:aboutText forKey:@"footerText"];
@@ -265,12 +272,17 @@
 
 - (void)presentVersionPickerWithVersions:(NSArray*)versions appId:(long long)appId
 {
+	[self presentVersionPickerWithVersions:versions appId:appId completion:^(NSDictionary* selectedVersion)
+	{
+		[self downloadAppWithAppId:appId versionId:[selectedVersion[@"external_identifier"] longLongValue]];
+	}];
+}
+
+- (void)presentVersionPickerWithVersions:(NSArray*)versions appId:(long long)appId completion:(void (^)(NSDictionary* selectedVersion))completion
+{
 	dispatch_async(dispatch_get_main_queue(), ^
 	{
-		WFSVersionPickerViewController* picker = [[WFSVersionPickerViewController alloc] initWithVersions:versions completion:^(NSDictionary* selectedVersion)
-		{
-			[self downloadAppWithAppId:appId versionId:[selectedVersion[@"external_identifier"] longLongValue]];
-		}];
+		WFSVersionPickerViewController* picker = [[WFSVersionPickerViewController alloc] initWithVersions:versions completion:completion];
 		UINavigationController* nav = [[UINavigationController alloc] initWithRootViewController:picker];
 		nav.modalPresentationStyle = UIModalPresentationFormSheet;
 		if (@available(iOS 15.0, *))
@@ -294,7 +306,7 @@
 
 - (NSString*)getAboutText
 {
-	return @"WaffleStore v1.0.0\nMade by muz011, based on MuffinStore by Mineek\nApp Icon designed by Kate\nhttps://github.com/mineek/MuffinStore";
+	return @"WaffleStore v1.1.0\nMade by muz011, based on MuffinStore by Mineek\nApp Icon designed by Kate\nhttps://github.com/mineek/MuffinStore";
 }
 
 - (void)showAlert:(NSString*)title message:(NSString*)message
@@ -377,7 +389,15 @@
 		{
 			dispatch_async(dispatch_get_main_queue(), ^
 			{
-				[self showAlert:@"Error" message:@"No version IDs found. The server may not have records for this app."];
+				UIAlertController* noVersionsAlert = [UIAlertController alertControllerWithTitle:@"No Versions Found" message:@"No version IDs were found on the version server. You can try fetching the version list directly from Apple with your Apple ID." preferredStyle:UIAlertControllerStyleAlert];
+				UIAlertAction* appleIdAction = [UIAlertAction actionWithTitle:@"Try Apple ID" style:UIAlertActionStyleDefault handler:^(UIAlertAction* action)
+				{
+					[self startAppleIDDownloadForAppId:appId];
+				}];
+				[noVersionsAlert addAction:appleIdAction];
+				UIAlertAction* cancelAction = [UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil];
+				[noVersionsAlert addAction:cancelAction];
+				[self wfsPresentViewController:noVersionsAlert];
 			});
 			return;
 		}
@@ -429,6 +449,11 @@
 			[self getAllAppVersionIdsFromServer:appId];
 		}];
 		[promptAlert addAction:serverAction];
+		UIAlertAction* appleIdAction = [UIAlertAction actionWithTitle:@"Use Apple ID Version List" style:UIAlertActionStyleDefault handler:^(UIAlertAction* action)
+		{
+			[self startAppleIDDownloadForAppId:appId];
+		}];
+		[promptAlert addAction:appleIdAction];
 		UIAlertAction* manualAction = [UIAlertAction actionWithTitle:@"Enter Version ID Manually" style:UIAlertActionStyleDefault handler:^(UIAlertAction* action)
 		{
 			[self promptForVersionId:appId];
@@ -483,6 +508,35 @@
 	});
 }
 
+- (long long)parseAppIdFromLink:(NSString*)link
+{
+	if (![link containsString:@"id"])
+	{
+		return 0;
+	}
+	NSArray* components = [link componentsSeparatedByString:@"id"];
+	if (components.count < 2)
+	{
+		return 0;
+	}
+	NSArray* idComponents = [components[1] componentsSeparatedByString:@"?"];
+	NSString* raw = idComponents[0];
+	NSMutableString* digits = [NSMutableString string];
+	for (NSUInteger i = 0; i < raw.length; i++)
+	{
+		unichar c = [raw characterAtIndex:i];
+		if (c >= '0' && c <= '9')
+		{
+			[digits appendFormat:@"%C", c];
+		}
+		else
+		{
+			break;
+		}
+	}
+	return [digits longLongValue];
+}
+
 - (void)downloadAppWithLink:(NSString*)link
 {
 	if (![self isNetworkReachable])
@@ -490,26 +544,15 @@
 		[self showAlert:@"No Internet" message:@"Please check your internet connection and try again."];
 		return;
 	}
-	NSString* targetAppIdParsed = nil;
-	if ([link containsString:@"id"])
-	{
-		NSArray* components = [link componentsSeparatedByString:@"id"];
-		if (components.count < 2)
-		{
-			[self showAlert:@"Error" message:@"Invalid link"];
-			return;
-		}
-		NSArray* idComponents = [components[1] componentsSeparatedByString:@"?"];
-		targetAppIdParsed = idComponents[0];
-	}
-	else
+	long long targetAppIdParsed = [self parseAppIdFromLink:link];
+	if (targetAppIdParsed <= 0)
 	{
 		[self showAlert:@"Error" message:@"Invalid link"];
 		return;
 	}
 	dispatch_async(dispatch_get_main_queue(), ^
 	{
-		[self getAllAppVersionIdsAndPrompt:[targetAppIdParsed longLongValue] metadataPlist:nil];
+		[self getAllAppVersionIdsAndPrompt:targetAppIdParsed metadataPlist:nil];
 	});
 }
 
@@ -528,6 +571,264 @@
 	UIAlertAction* cancelAction = [UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil];
 	[linkAlert addAction:cancelAction];
 	[self wfsPresentViewController:linkAlert];
+}
+
+#pragma mark - Apple ID download
+
+- (void)downloadAppWithAppleID
+{
+	UIAlertController* linkAlert = [UIAlertController alertControllerWithTitle:@"App Link" message:@"Enter the App Store link to the app you want to download with your Apple ID." preferredStyle:UIAlertControllerStyleAlert];
+	[linkAlert addTextFieldWithConfigurationHandler:^(UITextField* textField)
+	{
+		textField.placeholder = @"https://apps.apple.com/app/idXXXXXXXXX";
+	}];
+	UIAlertAction* continueAction = [UIAlertAction actionWithTitle:@"Continue" style:UIAlertActionStyleDefault handler:^(UIAlertAction* action)
+	{
+		long long appId = [self parseAppIdFromLink:linkAlert.textFields.firstObject.text];
+		if (appId <= 0)
+		{
+			[self showAlert:@"Error" message:@"Invalid link"];
+			return;
+		}
+		[self startAppleIDDownloadForAppId:appId];
+	}];
+	[linkAlert addAction:continueAction];
+	UIAlertAction* cancelAction = [UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil];
+	[linkAlert addAction:cancelAction];
+	[self wfsPresentViewController:linkAlert];
+}
+
+- (void)startAppleIDDownloadForAppId:(long long)appId
+{
+	if (![self isNetworkReachable])
+	{
+		[self showAlert:@"No Internet" message:@"Please check your internet connection and try again."];
+		return;
+	}
+	WFSAppleIDDownloader* downloader = [WFSAppleIDDownloader sharedDownloader];
+	if (!downloader.isAuthenticated)
+	{
+		[self promptAppleIDCredentialsWithCompletion:^(BOOL success)
+		{
+			if (success)
+			{
+				[self fetchAppleIDVersionsForAppId:appId];
+			}
+		}];
+		return;
+	}
+	[self fetchAppleIDVersionsForAppId:appId];
+}
+
+- (void)promptAppleIDCredentialsWithCompletion:(void (^)(BOOL success))completion
+{
+	dispatch_async(dispatch_get_main_queue(), ^
+	{
+		UIAlertController* signInAlert = [UIAlertController alertControllerWithTitle:@"Apple ID" message:@"Sign in to Apple to fetch the app's version list directly from the App Store.\n\nYour password is only used for this request and is never stored." preferredStyle:UIAlertControllerStyleAlert];
+		[signInAlert addTextFieldWithConfigurationHandler:^(UITextField* textField)
+		{
+			textField.placeholder = @"Apple ID email";
+			textField.keyboardType = UIKeyboardTypeEmailAddress;
+			textField.autocorrectionType = UITextAutocorrectionTypeNo;
+			textField.autocapitalizationType = UITextAutocapitalizationTypeNone;
+			textField.text = [[NSUserDefaults standardUserDefaults] objectForKey:@"wfsAppleIDEmail"];
+		}];
+		[signInAlert addTextFieldWithConfigurationHandler:^(UITextField* textField)
+		{
+			textField.placeholder = @"Password";
+			textField.secureTextEntry = YES;
+		}];
+		UIAlertAction* signInAction = [UIAlertAction actionWithTitle:@"Sign In" style:UIAlertActionStyleDefault handler:^(UIAlertAction* action)
+		{
+			NSString* email = signInAlert.textFields.firstObject.text;
+			NSString* password = signInAlert.textFields[1].text;
+			if (email.length == 0 || password.length == 0)
+			{
+				[self showAlert:@"Error" message:@"Please enter your Apple ID and password."];
+				completion(NO);
+				return;
+			}
+			[self authenticateAppleIDWithEmail:email password:password completion:completion];
+		}];
+		[signInAlert addAction:signInAction];
+		UIAlertAction* cancelAction = [UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil];
+		[signInAlert addAction:cancelAction];
+		[self wfsPresentViewController:signInAlert];
+	});
+}
+
+- (void)authenticateAppleIDWithEmail:(NSString*)email password:(NSString*)password completion:(void (^)(BOOL success))completion
+{
+	[self showDownloadProgressWithMessage:@"Signing in to Apple…"];
+	[[WFSAppleIDDownloader sharedDownloader] authenticateWithAppleId:email password:password completion:^(NSError* error)
+	{
+		[self dismissDownloadProgress];
+		if (!error)
+		{
+			completion(YES);
+			return;
+		}
+		if (error.code == WFSAppleIDDownloaderError2FARequired)
+		{
+			[self promptTwoFactorCodeWithCompletion:completion];
+			return;
+		}
+		[self showAlert:@"Sign In Failed" message:error.localizedDescription];
+		completion(NO);
+	}];
+}
+
+- (void)promptTwoFactorCodeWithCompletion:(void (^)(BOOL success))completion
+{
+	dispatch_async(dispatch_get_main_queue(), ^
+	{
+		UIAlertController* codeAlert = [UIAlertController alertControllerWithTitle:@"Two-Factor Authentication" message:@"Enter the verification code sent to your trusted devices." preferredStyle:UIAlertControllerStyleAlert];
+		[codeAlert addTextFieldWithConfigurationHandler:^(UITextField* textField)
+		{
+			textField.placeholder = @"6-digit code";
+			textField.keyboardType = UIKeyboardTypeNumberPad;
+		}];
+		UIAlertAction* verifyAction = [UIAlertAction actionWithTitle:@"Verify" style:UIAlertActionStyleDefault handler:^(UIAlertAction* action)
+		{
+			NSString* code = codeAlert.textFields.firstObject.text;
+			if (code.length == 0)
+			{
+				completion(NO);
+				return;
+			}
+			[self showDownloadProgressWithMessage:@"Verifying code…"];
+			[[WFSAppleIDDownloader sharedDownloader] retryWithTwoFactorCode:code completion:^(NSError* error)
+			{
+				[self dismissDownloadProgress];
+				if (error)
+				{
+					[self showAlert:@"Sign In Failed" message:error.localizedDescription];
+					completion(NO);
+					return;
+				}
+				completion(YES);
+			}];
+		}];
+		[codeAlert addAction:verifyAction];
+		UIAlertAction* cancelAction = [UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil];
+		[codeAlert addAction:cancelAction];
+		[self wfsPresentViewController:codeAlert];
+	});
+}
+
+- (void)fetchAppleIDVersionsForAppId:(long long)appId
+{
+	[self showDownloadProgressWithMessage:@"Fetching version list from Apple…"];
+	[[WFSAppleIDDownloader sharedDownloader] getVersionsForAppId:appId completion:^(NSArray* versions, NSDictionary* metadata, NSError* error)
+	{
+		[self dismissDownloadProgress];
+		if (error)
+		{
+			if (error.code == WFSAppleIDDownloaderErrorLicenseNotFound)
+			{
+				[self showAlert:@"Not Purchased" message:[NSString stringWithFormat:@"%@\n\nApple only allows downloading apps that are free or that have been purchased with this Apple ID.", error.localizedDescription]];
+				return;
+			}
+			[self showAlert:@"Apple ID Error" message:error.localizedDescription];
+			return;
+		}
+		NSMutableArray* list = [NSMutableArray arrayWithArray:versions];
+		NSString* currentVersion = [metadata isKindOfClass:[NSDictionary class]] ? metadata[@"bundleShortVersionString"] : nil;
+		if (![currentVersion isKindOfClass:[NSString class]] || currentVersion.length == 0)
+		{
+			currentVersion = @"Latest";
+		}
+		[list insertObject:@{@"external_identifier": @0, @"bundle_version": currentVersion} atIndex:0];
+		if (list.count == 1)
+		{
+			[self promptDownloadMethodForAppId:appId versionId:0 metadata:metadata];
+			return;
+		}
+		[self presentVersionPickerWithVersions:list appId:appId completion:^(NSDictionary* selectedVersion)
+		{
+			long long versionId = [selectedVersion[@"external_identifier"] longLongValue];
+			[self promptDownloadMethodForAppId:appId versionId:versionId metadata:metadata];
+		}];
+	}];
+}
+
+- (void)promptDownloadMethodForAppId:(long long)appId versionId:(long long)versionId metadata:(NSDictionary*)metadata
+{
+	dispatch_async(dispatch_get_main_queue(), ^
+	{
+		UIAlertController* methodAlert = [UIAlertController alertControllerWithTitle:@"Download" message:@"Choose how to get the app." preferredStyle:UIAlertControllerStyleAlert];
+		UIAlertAction* appStoreAction = [UIAlertAction actionWithTitle:@"Install via App Store" style:UIAlertActionStyleDefault handler:^(UIAlertAction* action)
+		{
+			[self downloadAppWithAppId:appId versionId:versionId];
+		}];
+		[methodAlert addAction:appStoreAction];
+		UIAlertAction* saveAction = [UIAlertAction actionWithTitle:@"Save .ipa to Files" style:UIAlertActionStyleDefault handler:^(UIAlertAction* action)
+		{
+			[self downloadIPAForAppId:appId versionId:versionId];
+		}];
+		[methodAlert addAction:saveAction];
+		UIAlertAction* cancelAction = [UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil];
+		[methodAlert addAction:cancelAction];
+		[self wfsPresentViewController:methodAlert];
+	});
+}
+
+- (void)downloadIPAForAppId:(long long)appId versionId:(long long)versionId
+{
+	if (![self isNetworkReachable])
+	{
+		[self showAlert:@"No Internet" message:@"Please check your internet connection and try again."];
+		return;
+	}
+	[self showDownloadProgressWithMessage:@"Getting download link from Apple…"];
+	[[WFSAppleIDDownloader sharedDownloader] getDownloadInfoForAppId:appId versionId:versionId completion:^(NSURL* ipaURL, NSDictionary* metadata, NSError* error)
+	{
+		if (error)
+		{
+			[self dismissDownloadProgress];
+			if (error.code == WFSAppleIDDownloaderErrorLicenseNotFound)
+			{
+				[self showAlert:@"Not Purchased" message:[NSString stringWithFormat:@"%@\n\nApple only allows downloading apps that are free or that have been purchased with this Apple ID.", error.localizedDescription]];
+				return;
+			}
+			[self showAlert:@"Apple ID Error" message:error.localizedDescription];
+			return;
+		}
+		NSString* directory = [[NSHomeDirectory() stringByAppendingPathComponent:@"Documents"] stringByAppendingPathComponent:@"Downgrades"];
+		[[NSFileManager defaultManager] createDirectoryAtPath:directory withIntermediateDirectories:YES attributes:nil error:nil];
+		NSString* bundleId = [metadata isKindOfClass:[NSDictionary class]] ? metadata[@"softwareVersionBundleId"] : nil;
+		if (![bundleId isKindOfClass:[NSString class]] || bundleId.length == 0)
+		{
+			bundleId = [NSString stringWithFormat:@"app%lld", appId];
+		}
+		NSString* filename = [NSString stringWithFormat:@"%@-%lld-%lld.ipa", bundleId, appId, versionId];
+		NSString* destination = [directory stringByAppendingPathComponent:filename];
+		NSMutableURLRequest* request = [NSMutableURLRequest requestWithURL:ipaURL];
+		[request setValue:@"Configurator/2.17 (Macintosh; OS X 15.2; 24C5089c) AppleWebKit/0620.1.16.11.6" forHTTPHeaderField:@"User-Agent"];
+		[self showDownloadProgressWithMessage:@"Downloading .ipa…"];
+		NSURLSessionDownloadTask* task = [[NSURLSession sharedSession] downloadTaskWithRequest:request completionHandler:^(NSURL* location, NSURLResponse* response, NSError* downloadError)
+		{
+			dispatch_async(dispatch_get_main_queue(), ^
+			{
+				[self dismissDownloadProgress];
+				if (downloadError || !location)
+				{
+					[self showAlert:@"Download Failed" message:downloadError.localizedDescription ?: @"Unknown error."];
+					return;
+				}
+				[[NSFileManager defaultManager] removeItemAtPath:destination error:nil];
+				NSError* moveError = nil;
+				[[NSFileManager defaultManager] moveItemAtURL:location toURL:[NSURL fileURLWithPath:destination] error:&moveError];
+				if (moveError)
+				{
+					[self showAlert:@"Save Failed" message:moveError.localizedDescription];
+					return;
+				}
+				[self showAlert:@"Downloaded" message:[NSString stringWithFormat:@"Saved to:\n%@\n\nYou can find it in the Files app under WaffleStore.", destination]];
+			});
+		}];
+		[task resume];
+	}];
 }
 
 @end
