@@ -18,6 +18,18 @@
 	<true/>
 	<key>com.apple.itunesstored.private</key>
 	<true/>
+	<key>com.apple.private.appstored</key>
+	<true/>
+	<key>com.apple.appstored.private</key>
+	<true/>
+	<key>com.apple.private.accounts.allaccounts</key>
+	<true/>
+	<key>com.apple.security.exception.mach-lookup.global-name</key>
+	<array>
+		<string>com.apple.appstored</string>
+		<string>com.apple.appstored.xpc</string>
+		<string>com.apple.storekitd</string>
+	</array>
 	<key>com.apple.private.uninstall.deletion</key>
 	<true/>
 	<key>SBAppUsesLocalNotifications</key>

@@ -1,5 +1,6 @@
 #import "WFSRootViewController.h"
 #import "WFSVersionPickerViewController.h"
+#import "WFSPurchasedAppsViewController.h"
 #import "CoreServices.h"
 #import <SystemConfiguration/SystemConfiguration.h>
 
@@ -55,6 +56,16 @@
 		NSString* aboutText = [self getAboutText];
 		[downloadGroupSpecifier setProperty:aboutText forKey:@"footerText"];
 
+		PSSpecifier* appleIdGroupSpecifier = [PSSpecifier emptyGroupSpecifier];
+		appleIdGroupSpecifier.name = @"Apple ID";
+		[_specifiers addObject:appleIdGroupSpecifier];
+
+		PSSpecifier* purchasesSpecifier = [PSSpecifier preferenceSpecifierNamed:@"Purchased Apps" target:self set:nil get:nil detail:nil cell:PSButtonCell edit:nil];
+		purchasesSpecifier.identifier = @"purchases";
+		[purchasesSpecifier setProperty:@YES forKey:@"enabled"];
+		purchasesSpecifier.buttonAction = @selector(showPurchasedApps);
+		[_specifiers addObject:purchasesSpecifier];
+
 		PSSpecifier* installedGroupSpecifier = [PSSpecifier emptyGroupSpecifier];
 		installedGroupSpecifier.name = @"Installed Apps";
 		[_specifiers addObject:installedGroupSpecifier];
@@ -95,6 +106,23 @@
 	}
 	CFRelease(reachability);
 	return reachable;
+}
+
+- (void)showPurchasedApps
+{
+	WFSPurchasedAppsViewController* purchasesViewController = [[WFSPurchasedAppsViewController alloc] initWithSelectionHandler:^(long long appId, NSDictionary* metadataPlist)
+	{
+		[self getAllAppVersionIdsAndPrompt:appId metadataPlist:metadataPlist];
+	}];
+	if (self.navigationController)
+	{
+		[self.navigationController pushViewController:purchasesViewController animated:YES];
+	}
+	else
+	{
+		UINavigationController* nav = [[UINavigationController alloc] initWithRootViewController:purchasesViewController];
+		[self presentViewController:nav animated:YES completion:nil];
+	}
 }
 
 - (void)downloadAppShortcut:(PSSpecifier*)specifier
@@ -288,7 +316,7 @@
 
 - (NSString*)getAboutText
 {
-	return @"WaffleStore v1.3\nMade by Mineek\nApp Icon designed by Kate\nhttps://github.com/mineek/MuffinStore";
+	return @"WaffleStore v1.4\nMade by Mineek\nApp Icon designed by Kate\nhttps://github.com/mineek/MuffinStore";
 }
 
 - (void)showAlert:(NSString*)title message:(NSString*)message
