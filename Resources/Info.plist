@@ -38,7 +38,7 @@
 		</dict>
 	</dict>
 	<key>CFBundleIdentifier</key>
-	<string>dev.mineek.wafflestore</string>
+	<string>org.muz011.wafflestore</string>
 	<key>CFBundleInfoDictionaryVersion</key>
 	<string>6.0</string>
 	<key>CFBundlePackageType</key>

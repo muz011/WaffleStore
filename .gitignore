@@ -1,3 +1,5 @@
 .theos/
 packages/
+output/
+*.tipa
 .DS_Store

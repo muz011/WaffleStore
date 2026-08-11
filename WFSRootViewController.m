@@ -203,13 +203,58 @@
 		[self showAlert:@"Error" message:@"No version identifiers found in iTunesMetadata.plist."];
 		return;
 	}
-	NSMutableArray* versions = [NSMutableArray new];
+	NSMutableArray* plistVersions = [NSMutableArray new];
 	for (NSNumber* versionId in versionIds)
 	{
-		[versions addObject:@{ @"external_identifier": versionId, @"bundle_version": @"" }];
+		[plistVersions addObject:@{ @"external_identifier": versionId, @"bundle_version": @"" }];
 	}
-	NSArray* newestFirst = [[versions reverseObjectEnumerator] allObjects];
-	[self presentVersionPickerWithVersions:newestFirst appId:appId];
+	if (![self isNetworkReachable])
+	{
+		NSArray* newestFirst = [[plistVersions reverseObjectEnumerator] allObjects];
+		[self presentVersionPickerWithVersions:newestFirst appId:appId];
+		return;
+	}
+	NSString* serverURL = @"https://apis.bilin.eu.org/history/";
+	NSURL* url = [NSURL URLWithString:[NSString stringWithFormat:@"%@%lld", serverURL, appId]];
+	NSURLRequest* request = [NSURLRequest requestWithURL:url];
+	NSURLSessionDataTask* task = [[NSURLSession sharedSession] dataTaskWithRequest:request completionHandler:^(NSData* data, NSURLResponse* response, NSError* error)
+	{
+		NSMutableArray* mergedVersions = [NSMutableArray new];
+		NSMutableSet* seenIds = [NSMutableSet new];
+		if (!error)
+		{
+			NSDictionary* json = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
+			NSArray* serverVersions = json[@"data"];
+			for (NSDictionary* serverVersion in serverVersions)
+			{
+				NSNumber* externalId = serverVersion[@"external_identifier"];
+				if (!externalId || [seenIds containsObject:externalId])
+				{
+					continue;
+				}
+				[seenIds addObject:externalId];
+				[mergedVersions addObject:serverVersion];
+			}
+		}
+		for (NSDictionary* plistVersion in plistVersions)
+		{
+			if (![seenIds containsObject:plistVersion[@"external_identifier"]])
+			{
+				[seenIds addObject:plistVersion[@"external_identifier"]];
+				[mergedVersions addObject:plistVersion];
+			}
+		}
+		dispatch_async(dispatch_get_main_queue(), ^
+		{
+			if (mergedVersions.count == 0)
+			{
+				[self showAlert:@"Error" message:@"No versions found."];
+				return;
+			}
+			[self presentVersionPickerWithVersions:mergedVersions appId:appId];
+		});
+	}];
+	[task resume];
 }
 
 - (void)presentVersionPickerWithVersions:(NSArray*)versions appId:(long long)appId

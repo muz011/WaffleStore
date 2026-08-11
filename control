@@ -1,4 +1,4 @@
-Package: dev.mineek.wafflestore
+Package: org.muz011.wafflestore
 Name: WaffleStore
 Version: 0.0.1
 Architecture: iphoneos-arm
