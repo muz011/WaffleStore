@@ -1,5 +1,6 @@
 #import "WFSPurchasedAppsViewController.h"
 #import "WFSAppleStore.h"
+#import "WFSDevicePurchaseScanner.h"
 #import "CoreServices.h"
 
 static dispatch_queue_t WFSMergeQueue(void)
@@ -20,6 +21,7 @@ static dispatch_queue_t WFSMergeQueue(void)
 @property (nonatomic, strong) NSMutableDictionary* storeInfo;
 @property (nonatomic, strong) NSMutableSet* removedStoreIDs;
 @property (nonatomic, strong) NSMutableSet* installedBundleIDs;
+@property (nonatomic, strong) NSMutableSet* localScannedKeys;
 @property (nonatomic, strong) NSCache* imageCache;
 @property (nonatomic, strong) UISegmentedControl* filterControl;
 @property (nonatomic, strong) UILabel* accountLabel;
@@ -52,6 +54,7 @@ static NSString* const WFSPurchasedCellIdentifier = @"WFSPurchasedCellIdentifier
 	self.visibleApps = [NSMutableArray new];
 	self.storeInfo = [NSMutableDictionary new];
 	self.removedStoreIDs = [NSMutableSet new];
+	self.localScannedKeys = [NSMutableSet new];
 	self.imageCache = [NSCache new];
 	self.tableView.rowHeight = 60;
 	self.tableView.tableFooterView = [UIView new];
@@ -350,7 +353,7 @@ static NSString* const WFSPurchasedCellIdentifier = @"WFSPurchasedCellIdentifier
 					if (pending == 0)
 					{
 						NSArray* allApps = [merged allValues];
-						[self allHistoryLoaded:allApps];
+						[self allHistoryLoaded:allApps dsid:dsid];
 					}
 				});
 			}
@@ -362,39 +365,205 @@ static NSString* const WFSPurchasedCellIdentifier = @"WFSPurchasedCellIdentifier
 	}
 }
 
-- (void)allHistoryLoaded:(NSArray*)apps
+- (void)allHistoryLoaded:(NSArray*)apps dsid:(long long)dsid
 {
 	__weak typeof(self) weakSelf = self;
 	dispatch_async(dispatch_get_main_queue(), ^
 	{
 		__strong typeof(weakSelf) self = weakSelf;
-		self.didLoadHistory = YES;
-		NSArray* sortedApps = apps;
-		@try
-		{
-			sortedApps = [apps sortedArrayUsingComparator:^NSComparisonResult(ASDPurchaseHistoryApp* a, ASDPurchaseHistoryApp* b)
-			{
-				NSDate* dateA = a.datePurchased ?: [NSDate distantPast];
-				NSDate* dateB = b.datePurchased ?: [NSDate distantPast];
-				return [dateB compare:dateA];
-			}];
-		}
-		@catch (NSException* exception)
-		{
-			NSLog(@"[WaffleStore] Purchases: sort exception %@ %@", exception.name, exception.reason);
-		}
-		self.allApps = [sortedApps mutableCopy];
 		[self refreshInstalledBundleIDs];
-		if (self.allApps.count == 0)
-		{
-			[self setLoading:NO];
-			self.statusLabel.hidden = NO;
-			self.statusLabel.text = @"No purchases found for this account.";
-			[self applyFilter];
-			return;
-		}
-		[self fetchStoreMetadataForApps:self.allApps];
+		[self mergeDevicePurchasesWithApps:apps dsid:dsid];
 	});
+}
+
+- (void)mergeDevicePurchasesWithApps:(NSArray*)apps dsid:(long long)dsid
+{
+	__weak typeof(self) weakSelf = self;
+	dispatch_async(WFSMergeQueue(), ^
+	{
+		__strong typeof(weakSelf) self = weakSelf;
+		NSMutableArray* all = [NSMutableArray arrayWithArray:apps];
+		NSMutableSet* seenStoreIDs = [NSMutableSet new];
+		NSMutableSet* seenBundleIDs = [NSMutableSet new];
+		for (ASDPurchaseHistoryApp* app in apps)
+		{
+			if (app.storeItemID > 0)
+			{
+				[seenStoreIDs addObject:@(app.storeItemID)];
+			}
+			if (app.bundleID.length > 0)
+			{
+				[seenBundleIDs addObject:app.bundleID];
+			}
+		}
+		NSMutableSet* localScanned = [NSMutableSet new];
+		NSArray* scanned = [WFSDevicePurchaseScanner scanPurchasesForDSID:dsid];
+		for (NSDictionary* entry in scanned)
+		{
+			NSNumber* storeID = entry[WFSDevicePurchaseStoreIDKey];
+			NSString* bundleID = entry[WFSDevicePurchaseBundleIDKey];
+			if (storeID && [seenStoreIDs containsObject:storeID])
+			{
+				continue;
+			}
+			if (bundleID.length && [seenBundleIDs containsObject:bundleID])
+			{
+				continue;
+			}
+			if (bundleID.length && [self.installedBundleIDs containsObject:bundleID])
+			{
+				continue;
+			}
+			if (!storeID && bundleID.length)
+			{
+				NSNumber* resolved = [self resolveStoreIDForBundleID:bundleID];
+				if (resolved)
+				{
+					storeID = resolved;
+					if ([seenStoreIDs containsObject:storeID])
+					{
+						continue;
+					}
+					NSMutableDictionary* enriched = [entry mutableCopy];
+					enriched[WFSDevicePurchaseStoreIDKey] = storeID;
+					entry = enriched;
+				}
+			}
+			ASDPurchaseHistoryApp* app = [self historyAppFromScannedEntry:entry];
+			if (!app)
+			{
+				continue;
+			}
+			[all addObject:app];
+			NSString* key = bundleID.length ? bundleID : [NSString stringWithFormat:@"id:%@", storeID];
+			[localScanned addObject:key];
+			if (storeID)
+			{
+				[seenStoreIDs addObject:storeID];
+			}
+			if (bundleID.length)
+			{
+				[seenBundleIDs addObject:bundleID];
+			}
+		}
+		dispatch_async(dispatch_get_main_queue(), ^
+		{
+			__strong typeof(weakSelf) self = weakSelf;
+			self.didLoadHistory = YES;
+			self.localScannedKeys = localScanned;
+			NSArray* sortedApps = all;
+			@try
+			{
+				sortedApps = [all sortedArrayUsingComparator:^NSComparisonResult(ASDPurchaseHistoryApp* a, ASDPurchaseHistoryApp* b)
+				{
+					NSDate* dateA = a.datePurchased ?: [NSDate distantPast];
+					NSDate* dateB = b.datePurchased ?: [NSDate distantPast];
+					return [dateB compare:dateA];
+				}];
+			}
+			@catch (NSException* exception)
+			{
+				NSLog(@"[WaffleStore] Purchases: sort exception %@ %@", exception.name, exception.reason);
+			}
+			self.allApps = [sortedApps mutableCopy];
+			if (self.allApps.count == 0)
+			{
+				[self setLoading:NO];
+				self.statusLabel.hidden = NO;
+				self.statusLabel.text = @"No purchases found for this account.";
+				[self applyFilter];
+				return;
+			}
+			[self fetchStoreMetadataForApps:self.allApps];
+		});
+	});
+}
+
+- (ASDPurchaseHistoryApp*)historyAppFromScannedEntry:(NSDictionary*)entry
+{
+	@try
+	{
+		Class appClass = NSClassFromString(@"ASDPurchaseHistoryApp");
+		if (!appClass)
+		{
+			return nil;
+		}
+		ASDPurchaseHistoryApp* app = [appClass new];
+		NSNumber* storeID = entry[WFSDevicePurchaseStoreIDKey];
+		NSString* bundleID = entry[WFSDevicePurchaseBundleIDKey];
+		NSString* title = entry[WFSDevicePurchaseTitleKey];
+		NSDate* date = entry[WFSDevicePurchaseDateKey];
+		if (storeID)
+		{
+			[app setValue:storeID forKey:@"storeItemID"];
+		}
+		if (bundleID.length)
+		{
+			[app setValue:bundleID forKey:@"bundleID"];
+		}
+		if (title.length)
+		{
+			[app setValue:title forKey:@"title"];
+		}
+		if (date)
+		{
+			[app setValue:date forKey:@"datePurchased"];
+		}
+		return app;
+	}
+	@catch (NSException* exception)
+	{
+		NSLog(@"[WaffleStore] Purchases: historyAppFromScannedEntry exception %@ %@", exception.name, exception.reason);
+		return nil;
+	}
+}
+
+- (NSNumber*)resolveStoreIDForBundleID:(NSString*)bundleID
+{
+	NSString* encoded = [bundleID stringByAddingPercentEncodingWithAllowedCharacters:[NSCharacterSet URLQueryAllowedCharacterSet]];
+	NSURL* url = [NSURL URLWithString:[NSString stringWithFormat:@"https://itunes.apple.com/lookup?bundleId=%@&limit=1&media=software", encoded]];
+	if (!url)
+	{
+		return nil;
+	}
+	__block NSNumber* result = nil;
+	dispatch_semaphore_t semaphore = dispatch_semaphore_create(0);
+	NSURLSessionDataTask* task = [[NSURLSession sharedSession] dataTaskWithURL:url completionHandler:^(NSData* data, NSURLResponse* response, NSError* error)
+	{
+		if (!error && data.length)
+		{
+			NSDictionary* json = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
+			for (NSDictionary* item in json[@"results"])
+			{
+				if ([item isKindOfClass:[NSDictionary class]])
+				{
+					NSNumber* trackId = item[@"trackId"];
+					if (trackId && [trackId longLongValue] > 0)
+					{
+						result = trackId;
+						break;
+					}
+				}
+			}
+		}
+		dispatch_semaphore_signal(semaphore);
+	}];
+	[task resume];
+	dispatch_semaphore_wait(semaphore, dispatch_time(DISPATCH_TIME_NOW, (int64_t)(15 * NSEC_PER_SEC)));
+	return result;
+}
+
+- (NSString*)keyForApp:(ASDPurchaseHistoryApp*)app
+{
+	if (app.bundleID.length > 0)
+	{
+		return app.bundleID;
+	}
+	if (app.storeItemID > 0)
+	{
+		return [NSString stringWithFormat:@"id:%lld", app.storeItemID];
+	}
+	return nil;
 }
 
 - (void)refreshInstalledBundleIDs
@@ -499,11 +668,13 @@ static NSString* const WFSPurchasedCellIdentifier = @"WFSPurchasedCellIdentifier
 		{
 			BOOL installed = [self.installedBundleIDs containsObject:app.bundleID];
 			BOOL removed = [self.removedStoreIDs containsObject:@(app.storeItemID)];
+			NSString* key = [self keyForApp:app];
+			BOOL localOnly = key.length > 0 && [self.localScannedKeys containsObject:key];
 			if (segment == 1 && installed)
 			{
 				continue;
 			}
-			if (segment == 2 && !removed)
+			if (segment == 2 && !(removed || localOnly))
 			{
 				continue;
 			}
@@ -522,11 +693,21 @@ static NSString* const WFSPurchasedCellIdentifier = @"WFSPurchasedCellIdentifier
 {
 	BOOL installed = [self.installedBundleIDs containsObject:app.bundleID];
 	BOOL removed = [self.removedStoreIDs containsObject:@(app.storeItemID)];
+	NSString* key = [self keyForApp:app];
+	BOOL localOnly = key.length > 0 && [self.localScannedKeys containsObject:key];
 	if (removed)
 	{
 		return @"Removed from App Store";
 	}
-	return installed ? @"Installed" : @"Not Installed";
+	if (installed)
+	{
+		return @"Installed";
+	}
+	if (localOnly)
+	{
+		return @"Not in Purchases — found on this device";
+	}
+	return @"Not Installed";
 }
 
 - (NSDictionary*)iTunesMetadataPlistForBundleID:(NSString*)bundleID
@@ -746,6 +927,13 @@ static NSString* const WFSPurchasedCellIdentifier = @"WFSPurchasedCellIdentifier
 	}
 	ASDPurchaseHistoryApp* app = self.visibleApps[indexPath.row];
 	NSString* title = app.title.length ? app.title : app.bundleID;
+	if (app.storeItemID <= 0)
+	{
+		UIAlertController* infoAlert = [UIAlertController alertControllerWithTitle:title message:@"This app was removed from the App Store and its App ID is not recorded on this device. To download it, use the Download tab with its App Store link, or enter the App ID manually." preferredStyle:UIAlertControllerStyleAlert];
+		[infoAlert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
+		[self presentViewController:infoAlert animated:YES completion:nil];
+		return;
+	}
 	UIAlertController* alert = [UIAlertController alertControllerWithTitle:title message:[NSString stringWithFormat:@"%@\nChoose a version to download or downgrade.", [self statusForApp:app]] preferredStyle:UIAlertControllerStyleAlert];
 	__weak typeof(self) weakSelf = self;
 	[alert addAction:[UIAlertAction actionWithTitle:@"Choose Version" style:UIAlertActionStyleDefault handler:^(UIAlertAction* action)
