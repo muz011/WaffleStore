@@ -1,4 +1,4 @@
-name: build and upload MuffinStore
+name: build and upload WaffleStore
 
 on:
   push:
@@ -21,15 +21,15 @@ jobs:
         run: |
           sudo xcode-select -s /Applications/Xcode_16.2.0.app/Contents/Developer
 
-      - name: Build and Package MuffinStore
+      - name: Build and Package WaffleStore
         run: |
           cd $GITHUB_WORKSPACE
           FINALPACKAGE=1 gmake clean package
           mkdir -p ./output
-          mv ./packages/*.ipa ./output/MuffinStore-$(git rev-parse --short HEAD).ipa
+          mv ./packages/*.ipa ./output/WaffleStore-$(git rev-parse --short HEAD).ipa
 
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: MuffinStore IPA
+          name: WaffleStore IPA
           path: ./output/*.ipa

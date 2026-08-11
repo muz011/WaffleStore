@@ -5,7 +5,7 @@
     <key>platform-application</key>
 	<true/>
 	<key>application-identifier</key>
-    <string>dev.mineek.muffinstore</string>
+    <string>dev.mineek.wafflestore</string>
 	<key>com.apple.CommCenter.fine-grained</key>
 	<array>
 		<string>data-allowed-write</string>

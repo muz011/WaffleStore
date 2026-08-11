@@ -1,4 +1,4 @@
-# MuffinStore
+# WaffleStore
 App Store app downgrader / installer through TrollStore, or a jailbreak.
 
 ## Credits

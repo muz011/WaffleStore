@@ -1,5 +1,5 @@
-#import "MFSRootViewController.h"
-#import "MFSVersionPickerViewController.h"
+#import "WFSRootViewController.h"
+#import "WFSVersionPickerViewController.h"
 #import "CoreServices.h"
 #import <SystemConfiguration/SystemConfiguration.h>
 
@@ -24,11 +24,11 @@
 + (id)defaultContext;
 @end
 
-@interface MFSRootViewController ()
+@interface WFSRootViewController ()
 @property (nonatomic, strong) UIAlertController* progressAlert;
 @end
 
-@implementation MFSRootViewController
+@implementation WFSRootViewController
 
 - (void)loadView
 {
@@ -64,6 +64,10 @@
 		{
 			PSSpecifier* appSpecifier = [PSSpecifier preferenceSpecifierNamed:appProxy.localizedName target:self set:nil get:nil detail:nil cell:PSButtonCell edit:nil];
 			[appSpecifier setProperty:appProxy.bundleURL forKey:@"bundleURL"];
+			if (appProxy.bundleContainerURL)
+			{
+				[appSpecifier setProperty:appProxy.bundleContainerURL forKey:@"bundleContainerURL"];
+			}
 			[appSpecifier setProperty:@YES forKey:@"enabled"];
 			appSpecifier.buttonAction = @selector(downloadAppShortcut:);
 			[appSpecifiers addObject:appSpecifier];
@@ -74,7 +78,7 @@
 		}];
 		[_specifiers addObjectsFromArray:appSpecifiers];
 	}
-	[(UINavigationItem*)self.navigationItem setTitle:@"MuffinStore"];
+	[(UINavigationItem*)self.navigationItem setTitle:@"WaffleStore"];
 	return _specifiers;
 }
 
@@ -95,12 +99,23 @@
 
 - (void)downloadAppShortcut:(PSSpecifier*)specifier
 {
+	NSURL* bundleURL = [specifier propertyForKey:@"bundleURL"];
+	NSDictionary* metadataPlist = [self readITunesMetadataPlistForApp:bundleURL bundleContainerURL:[specifier propertyForKey:@"bundleContainerURL"]];
+	long long plistAppId = 0;
+	if (metadataPlist)
+	{
+		plistAppId = [metadataPlist[@"itemId"] longLongValue];
+	}
+	if (metadataPlist && plistAppId > 0)
+	{
+		[self getAllAppVersionIdsAndPrompt:plistAppId metadataPlist:metadataPlist];
+		return;
+	}
 	if (![self isNetworkReachable])
 	{
 		[self showAlert:@"No Internet" message:@"Please check your internet connection and try again."];
 		return;
 	}
-	NSURL* bundleURL = [specifier propertyForKey:@"bundleURL"];
 	NSDictionary* infoPlist = [NSDictionary dictionaryWithContentsOfFile:[bundleURL.path stringByAppendingPathComponent:@"Info.plist"]];
 	NSString* bundleId = infoPlist[@"CFBundleIdentifier"];
 	NSURL* url = [NSURL URLWithString:[NSString stringWithFormat:@"https://itunes.apple.com/lookup?bundleId=%@&limit=1&media=software", bundleId]];
@@ -135,14 +150,100 @@
 			return;
 		}
 		NSDictionary* app = results[0];
-		[self getAllAppVersionIdsAndPrompt:[app[@"trackId"] longLongValue]];
+		[self getAllAppVersionIdsAndPrompt:[app[@"trackId"] longLongValue] metadataPlist:nil];
 	}];
 	[task resume];
 }
 
+- (NSDictionary*)readITunesMetadataPlistForApp:(NSURL*)bundleURL bundleContainerURL:(NSURL*)bundleContainerURL
+{
+	NSFileManager* fileManager = [NSFileManager defaultManager];
+	NSMutableArray* candidatePaths = [NSMutableArray new];
+	if (bundleContainerURL)
+	{
+		[candidatePaths addObject:[bundleContainerURL URLByAppendingPathComponent:@"iTunesMetadata.plist"].path];
+	}
+	if (bundleURL)
+	{
+		[candidatePaths addObject:[bundleURL URLByAppendingPathComponent:@"iTunesMetadata.plist"].path];
+	}
+	for (NSString* path in candidatePaths)
+	{
+		if ([fileManager fileExistsAtPath:path])
+		{
+			NSDictionary* plist = [NSDictionary dictionaryWithContentsOfFile:path];
+			if (plist)
+			{
+				return plist;
+			}
+		}
+	}
+	return nil;
+}
+
+- (NSArray*)versionIdsFromMetadataPlist:(NSDictionary*)metadataPlist
+{
+	NSArray* versionIds = metadataPlist[@"softwareVersionExternalIdentifiers"];
+	if (versionIds.count == 0)
+	{
+		NSNumber* singleId = metadataPlist[@"softwareVersionExternalIdentifier"];
+		if (singleId)
+		{
+			versionIds = @[singleId];
+		}
+	}
+	return versionIds;
+}
+
+- (void)showVersionsFromMetadataPlist:(NSDictionary*)metadataPlist appId:(long long)appId
+{
+	NSArray* versionIds = [self versionIdsFromMetadataPlist:metadataPlist];
+	if (versionIds.count == 0)
+	{
+		[self showAlert:@"Error" message:@"No version identifiers found in iTunesMetadata.plist."];
+		return;
+	}
+	NSMutableArray* versions = [NSMutableArray new];
+	for (NSNumber* versionId in versionIds)
+	{
+		[versions addObject:@{ @"external_identifier": versionId, @"bundle_version": @"" }];
+	}
+	NSArray* newestFirst = [[versions reverseObjectEnumerator] allObjects];
+	[self presentVersionPickerWithVersions:newestFirst appId:appId];
+}
+
+- (void)presentVersionPickerWithVersions:(NSArray*)versions appId:(long long)appId
+{
+	dispatch_async(dispatch_get_main_queue(), ^
+	{
+		WFSVersionPickerViewController* picker = [[WFSVersionPickerViewController alloc] initWithVersions:versions completion:^(NSDictionary* selectedVersion)
+		{
+			[self downloadAppWithAppId:appId versionId:[selectedVersion[@"external_identifier"] longLongValue]];
+		}];
+		UINavigationController* nav = [[UINavigationController alloc] initWithRootViewController:picker];
+		nav.modalPresentationStyle = UIModalPresentationFormSheet;
+		if (@available(iOS 15.0, *))
+		{
+			id sheet = [nav performSelector:@selector(sheetPresentationController)];
+			Class detentClass = NSClassFromString(@"UISheetPresentationControllerDetent");
+			if (sheet && detentClass)
+			{
+				id medium = [detentClass performSelector:@selector(mediumDetent)];
+				id large = [detentClass performSelector:@selector(largeDetent)];
+				if (medium && large)
+				{
+					[sheet setValue:@[medium, large] forKey:@"detents"];
+					[sheet setValue:@YES forKey:@"prefersGrabberVisible"];
+				}
+			}
+		}
+		[self presentViewController:nav animated:YES completion:nil];
+	});
+}
+
 - (NSString*)getAboutText
 {
-	return @"MuffinStore v1.3\nMade by Mineek\nApp Icon designed by Kate\nhttps://github.com/mineek/MuffinStore";
+	return @"WaffleStore v1.3\nMade by Mineek\nApp Icon designed by Kate\nhttps://github.com/mineek/MuffinStore";
 }
 
 - (void)showAlert:(NSString*)title message:(NSString*)message
@@ -231,28 +332,7 @@
 		}
 		dispatch_async(dispatch_get_main_queue(), ^
 		{
-			MFSVersionPickerViewController* picker = [[MFSVersionPickerViewController alloc] initWithVersions:versionIds completion:^(NSDictionary* selectedVersion)
-			{
-				[self downloadAppWithAppId:appId versionId:[selectedVersion[@"external_identifier"] longLongValue]];
-			}];
-			UINavigationController* nav = [[UINavigationController alloc] initWithRootViewController:picker];
-			nav.modalPresentationStyle = UIModalPresentationFormSheet;
-			if (@available(iOS 15.0, *))
-			{
-					id sheet = [nav performSelector:@selector(sheetPresentationController)];
-					Class detentClass = NSClassFromString(@"UISheetPresentationControllerDetent");
-					if (sheet && detentClass)
-					{
-						id medium = [detentClass performSelector:@selector(mediumDetent)];
-						id large = [detentClass performSelector:@selector(largeDetent)];
-						if (medium && large)
-						{
-							[sheet setValue:@[medium, large] forKey:@"detents"];
-							[sheet setValue:@YES forKey:@"prefersGrabberVisible"];
-						}
-					}
-			}
-			[self presentViewController:nav animated:YES completion:nil];
+			[self presentVersionPickerWithVersions:versionIds appId:appId];
 		});
 	}];
 	[task resume];
@@ -280,11 +360,19 @@
 	});
 }
 
-- (void)getAllAppVersionIdsAndPrompt:(long long)appId
+- (void)getAllAppVersionIdsAndPrompt:(long long)appId metadataPlist:(NSDictionary*)metadataPlist
 {
 	dispatch_async(dispatch_get_main_queue(), ^
 	{
 		UIAlertController* promptAlert = [UIAlertController alertControllerWithTitle:@"Version Selection" message:@"Choose how to select the app version to download." preferredStyle:UIAlertControllerStyleAlert];
+		if (metadataPlist && [self versionIdsFromMetadataPlist:metadataPlist].count > 0)
+		{
+			UIAlertAction* localAction = [UIAlertAction actionWithTitle:@"Use iTunesMetadata.plist" style:UIAlertActionStyleDefault handler:^(UIAlertAction* action)
+			{
+				[self showVersionsFromMetadataPlist:metadataPlist appId:appId];
+			}];
+			[promptAlert addAction:localAction];
+		}
 		UIAlertAction* serverAction = [UIAlertAction actionWithTitle:@"Browse Version List" style:UIAlertActionStyleDefault handler:^(UIAlertAction* action)
 		{
 			[self getAllAppVersionIdsFromServer:appId];
@@ -370,7 +458,7 @@
 	}
 	dispatch_async(dispatch_get_main_queue(), ^
 	{
-		[self getAllAppVersionIdsAndPrompt:[targetAppIdParsed longLongValue]];
+		[self getAllAppVersionIdsAndPrompt:[targetAppIdParsed longLongValue] metadataPlist:nil];
 	});
 }
 

@@ -1,5 +1,5 @@
 TARGET := iphone:clang:16.5:14.0
-INSTALL_TARGET_PROCESSES = MuffinStore
+INSTALL_TARGET_PROCESSES = WaffleStore
 ARCHS = arm64
 PACKAGE_VERSION = $(THEOS_PACKAGE_BASE_VERSION)
 PACKAGE_FORMAT = ipa
@@ -8,12 +8,12 @@ GO_EASY_ON_ME = 1
 
 include $(THEOS)/makefiles/common.mk
 
-APPLICATION_NAME = MuffinStore
+APPLICATION_NAME = WaffleStore
 
-MuffinStore_FILES = $(wildcard *.m)
-MuffinStore_FRAMEWORKS = UIKit CoreGraphics CoreServices SystemConfiguration
-MuffinStore_PRIVATE_FRAMEWORKS = Preferences StoreKitUI
-MuffinStore_CFLAGS = -fobjc-arc
-MuffinStore_CODESIGN_FLAGS = -Sentitlements.plist
+WaffleStore_FILES = $(wildcard *.m)
+WaffleStore_FRAMEWORKS = UIKit CoreGraphics CoreServices SystemConfiguration
+WaffleStore_PRIVATE_FRAMEWORKS = Preferences StoreKitUI
+WaffleStore_CFLAGS = -fobjc-arc
+WaffleStore_CODESIGN_FLAGS = -Sentitlements.plist
 
 include $(THEOS_MAKE_PATH)/application.mk

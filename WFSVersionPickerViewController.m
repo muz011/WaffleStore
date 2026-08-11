@@ -1,15 +1,15 @@
-#import "MFSVersionPickerViewController.h"
+#import "WFSVersionPickerViewController.h"
 
-@interface MFSVersionPickerViewController () <UISearchResultsUpdating>
+@interface WFSVersionPickerViewController () <UISearchResultsUpdating>
 @property(nonatomic, strong) NSArray *versions;
 @property(nonatomic, strong) NSArray *filteredVersions;
 @property(nonatomic, strong) UISearchController *searchController;
 @end
 
-@implementation MFSVersionPickerViewController
+@implementation WFSVersionPickerViewController
 
 - (instancetype)initWithVersions:(NSArray *)versions
-					  completion:(MFSVersionPickerCompletion)completion
+					  completion:(WFSVersionPickerCompletion)completion
 {
 	self = [super initWithStyle:UITableViewStyleInsetGrouped];
 	if (self)
@@ -105,7 +105,11 @@
 										forIndexPath:indexPath];
 
 	NSDictionary *version = self.filteredVersions[indexPath.row];
-	cell.textLabel.text = version[@"bundle_version"];
+	NSString *bundleVersion =
+		[NSString stringWithFormat:@"%@", version[@"bundle_version"] ?: @""];
+	NSString *externalIdentifier = [NSString
+		stringWithFormat:@"%@", version[@"external_identifier"] ?: @""];
+	cell.textLabel.text = bundleVersion.length > 0 ? bundleVersion : externalIdentifier;
 	cell.textLabel.font =
 		[UIFont monospacedDigitSystemFontOfSize:15 weight:UIFontWeightRegular];
 	cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
