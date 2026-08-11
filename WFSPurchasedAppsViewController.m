@@ -77,26 +77,38 @@ static NSString* const WFSPurchasedCellIdentifier = @"WFSPurchasedCellIdentifier
 
 - (void)setupHeaderView
 {
-	UIView* header = [[UIView alloc] initWithFrame:CGRectMake(0, 0, self.tableView.bounds.size.width, 104)];
+	CGFloat width = self.tableView.bounds.size.width;
+	if (width <= 0)
+	{
+		width = [UIScreen mainScreen].bounds.size.width;
+	}
+	UIView* header = [[UIView alloc] initWithFrame:CGRectMake(0, 0, width, 124)];
 
-	self.accountLabel = [[UILabel alloc] initWithFrame:CGRectMake(16, 10, header.bounds.size.width - 32, 20)];
+	self.accountLabel = [[UILabel alloc] initWithFrame:CGRectMake(16, 10, width - 32, 20)];
+	self.accountLabel.autoresizingMask = UIViewAutoresizingFlexibleWidth;
 	self.accountLabel.font = [UIFont systemFontOfSize:14 weight:UIFontWeightMedium];
 	self.accountLabel.textColor = [UIColor secondaryLabelColor];
 	self.accountLabel.text = @"Checking signed-in Apple ID…";
 	[header addSubview:self.accountLabel];
 
 	self.filterControl = [[UISegmentedControl alloc] initWithItems:@[@"All", @"Not Installed", @"Removed"]];
-	self.filterControl.frame = CGRectMake(16, 36, header.bounds.size.width - 32, 30);
+	self.filterControl.frame = CGRectMake(16, 36, width - 32, 32);
+	self.filterControl.autoresizingMask = UIViewAutoresizingFlexibleWidth;
 	self.filterControl.selectedSegmentIndex = 0;
+	NSDictionary* segmentFont = @{NSFontAttributeName: [UIFont systemFontOfSize:14 weight:UIFontWeightSemibold]};
+	[self.filterControl setTitleTextAttributes:segmentFont forState:UIControlStateNormal];
+	[self.filterControl setTitleTextAttributes:segmentFont forState:UIControlStateSelected];
 	[self.filterControl addTarget:self action:@selector(filterChanged) forControlEvents:UIControlEventValueChanged];
 	[header addSubview:self.filterControl];
 
-	UIView* statusView = [[UIView alloc] initWithFrame:CGRectMake(16, 72, header.bounds.size.width - 32, 24)];
+	UIView* statusView = [[UIView alloc] initWithFrame:CGRectMake(16, 74, width - 32, 26)];
+	statusView.autoresizingMask = UIViewAutoresizingFlexibleWidth;
 	self.spinner = [[UIActivityIndicatorView alloc] initWithActivityIndicatorStyle:UIActivityIndicatorViewStyleMedium];
 	self.spinner.frame = CGRectMake(0, 0, 24, 24);
 	[statusView addSubview:self.spinner];
 
-	self.statusLabel = [[UILabel alloc] initWithFrame:CGRectMake(28, 2, statusView.bounds.size.width - 28, 20)];
+	self.statusLabel = [[UILabel alloc] initWithFrame:CGRectMake(28, 2, statusView.bounds.size.width - 28, 22)];
+	self.statusLabel.autoresizingMask = UIViewAutoresizingFlexibleWidth;
 	self.statusLabel.font = [UIFont systemFontOfSize:13];
 	self.statusLabel.textColor = [UIColor secondaryLabelColor];
 	self.statusLabel.numberOfLines = 2;
@@ -333,12 +345,21 @@ static NSString* const WFSPurchasedCellIdentifier = @"WFSPurchasedCellIdentifier
 	{
 		__strong typeof(weakSelf) self = weakSelf;
 		self.didLoadHistory = YES;
-		self.allApps = [[apps sortedArrayUsingComparator:^NSComparisonResult(ASDPurchaseHistoryApp* a, ASDPurchaseHistoryApp* b)
+		NSArray* sortedApps = apps;
+		@try
 		{
-			NSDate* dateA = a.datePurchased ?: [NSDate distantPast];
-			NSDate* dateB = b.datePurchased ?: [NSDate distantPast];
-			return [dateB compare:dateA];
-		}] mutableCopy];
+			sortedApps = [apps sortedArrayUsingComparator:^NSComparisonResult(ASDPurchaseHistoryApp* a, ASDPurchaseHistoryApp* b)
+			{
+				NSDate* dateA = a.datePurchased ?: [NSDate distantPast];
+				NSDate* dateB = b.datePurchased ?: [NSDate distantPast];
+				return [dateB compare:dateA];
+			}];
+		}
+		@catch (NSException* exception)
+		{
+			NSLog(@"[WaffleStore] Purchases: sort exception %@ %@", exception.name, exception.reason);
+		}
+		self.allApps = [sortedApps mutableCopy];
 		[self refreshInstalledBundleIDs];
 		if (self.allApps.count == 0)
 		{
@@ -448,19 +469,26 @@ static NSString* const WFSPurchasedCellIdentifier = @"WFSPurchasedCellIdentifier
 {
 	NSInteger segment = self.filterControl.selectedSegmentIndex;
 	NSMutableArray* filtered = [NSMutableArray new];
-	for (ASDPurchaseHistoryApp* app in self.allApps)
+	@try
 	{
-		BOOL installed = [self.installedBundleIDs containsObject:app.bundleID];
-		BOOL removed = [self.removedStoreIDs containsObject:@(app.storeItemID)];
-		if (segment == 1 && installed)
+		for (ASDPurchaseHistoryApp* app in self.allApps)
 		{
-			continue;
+			BOOL installed = [self.installedBundleIDs containsObject:app.bundleID];
+			BOOL removed = [self.removedStoreIDs containsObject:@(app.storeItemID)];
+			if (segment == 1 && installed)
+			{
+				continue;
+			}
+			if (segment == 2 && !removed)
+			{
+				continue;
+			}
+			[filtered addObject:app];
 		}
-		if (segment == 2 && !removed)
-		{
-			continue;
-		}
-		[filtered addObject:app];
+	}
+	@catch (NSException* exception)
+	{
+		NSLog(@"[WaffleStore] Purchases: filter exception %@ %@", exception.name, exception.reason);
 	}
 	self.visibleApps = filtered;
 	[self.tableView reloadData];
@@ -568,7 +596,7 @@ static NSString* const WFSPurchasedCellIdentifier = @"WFSPurchasedCellIdentifier
 		[self performSystemSignIn];
 	}]];
 	[alert addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil]];
-	if (self.isViewLoaded && self.view.window)
+	if (self.isViewLoaded && self.view.window && self.presentedViewController == nil)
 	{
 		[self presentViewController:alert animated:YES completion:nil];
 	}
@@ -626,7 +654,7 @@ static NSString* const WFSPurchasedCellIdentifier = @"WFSPurchasedCellIdentifier
 	{
 		UIAlertController* alert = [UIAlertController alertControllerWithTitle:title message:message preferredStyle:UIAlertControllerStyleAlert];
 		[alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
-		if (self.isViewLoaded && self.view.window)
+		if (self.isViewLoaded && self.view.window && self.presentedViewController == nil)
 		{
 			[self presentViewController:alert animated:YES completion:nil];
 		}
@@ -647,6 +675,10 @@ static NSString* const WFSPurchasedCellIdentifier = @"WFSPurchasedCellIdentifier
 
 - (UITableViewCell*)tableView:(UITableView*)tableView cellForRowAtIndexPath:(NSIndexPath*)indexPath
 {
+	if (indexPath.row < 0 || indexPath.row >= self.visibleApps.count)
+	{
+		return [UITableViewCell new];
+	}
 	UITableViewCell* cell = [tableView dequeueReusableCellWithIdentifier:WFSPurchasedCellIdentifier];
 	if (!cell)
 	{
@@ -668,6 +700,10 @@ static NSString* const WFSPurchasedCellIdentifier = @"WFSPurchasedCellIdentifier
 - (void)tableView:(UITableView*)tableView didSelectRowAtIndexPath:(NSIndexPath*)indexPath
 {
 	[tableView deselectRowAtIndexPath:indexPath animated:YES];
+	if (indexPath.row < 0 || indexPath.row >= self.visibleApps.count || self.presentedViewController)
+	{
+		return;
+	}
 	ASDPurchaseHistoryApp* app = self.visibleApps[indexPath.row];
 	NSString* title = app.title.length ? app.title : app.bundleID;
 	UIAlertController* alert = [UIAlertController alertControllerWithTitle:title message:[NSString stringWithFormat:@"%@\nChoose a version to download or downgrade.", [self statusForApp:app]] preferredStyle:UIAlertControllerStyleAlert];
