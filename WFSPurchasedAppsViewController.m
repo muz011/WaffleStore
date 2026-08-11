@@ -17,7 +17,6 @@ static dispatch_queue_t WFSMergeQueue(void)
 
 @interface WFSPurchasedAppsViewController ()
 @property (nonatomic, copy) void (^selectionHandler)(long long appId, NSDictionary* metadataPlist);
-@property (nonatomic, copy, nullable) void (^appleIDSignInHandler)(void (^completion)(BOOL success));
 @property (nonatomic, strong) NSMutableArray* allApps;
 @property (nonatomic, strong) NSMutableArray* visibleApps;
 @property (nonatomic, strong) NSMutableDictionary* storeInfo;
