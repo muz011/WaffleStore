@@ -371,6 +371,7 @@ static NSString* const WFSPurchasedCellIdentifier = @"WFSPurchasedCellIdentifier
 	dispatch_async(dispatch_get_main_queue(), ^
 	{
 		__strong typeof(weakSelf) self = weakSelf;
+		self.didLoadHistory = YES;
 		[self refreshInstalledBundleIDs];
 		[self mergeDevicePurchasesWithApps:apps dsid:dsid];
 	});
@@ -397,6 +398,7 @@ static NSString* const WFSPurchasedCellIdentifier = @"WFSPurchasedCellIdentifier
 			}
 		}
 		NSMutableSet* localScanned = [NSMutableSet new];
+		__block NSInteger resolveBudget = 20;
 		NSArray* scanned = [WFSDevicePurchaseScanner scanPurchasesForDSID:dsid];
 		for (__strong NSDictionary* entry in scanned)
 		{
@@ -414,8 +416,9 @@ static NSString* const WFSPurchasedCellIdentifier = @"WFSPurchasedCellIdentifier
 			{
 				continue;
 			}
-			if (!storeID && bundleID.length)
+			if (!storeID && bundleID.length && resolveBudget > 0)
 			{
+				resolveBudget--;
 				NSNumber* resolved = [self resolveStoreIDForBundleID:bundleID];
 				if (resolved)
 				{
@@ -449,7 +452,6 @@ static NSString* const WFSPurchasedCellIdentifier = @"WFSPurchasedCellIdentifier
 		dispatch_async(dispatch_get_main_queue(), ^
 		{
 			__strong typeof(weakSelf) self = weakSelf;
-			self.didLoadHistory = YES;
 			self.localScannedKeys = localScanned;
 			NSArray* sortedApps = all;
 			@try
@@ -549,7 +551,7 @@ static NSString* const WFSPurchasedCellIdentifier = @"WFSPurchasedCellIdentifier
 		dispatch_semaphore_signal(semaphore);
 	}];
 	[task resume];
-	dispatch_semaphore_wait(semaphore, dispatch_time(DISPATCH_TIME_NOW, (int64_t)(15 * NSEC_PER_SEC)));
+	dispatch_semaphore_wait(semaphore, dispatch_time(DISPATCH_TIME_NOW, (int64_t)(5 * NSEC_PER_SEC)));
 	return result;
 }
 
