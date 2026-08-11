@@ -293,7 +293,7 @@ static NSString* const WFSPurchasedCellIdentifier = @"WFSPurchasedCellIdentifier
 				pending--;
 				if (pending == 0)
 				{
-					NSArray* allApps = nil;
+					__block NSArray* allApps = nil;
 					dispatch_sync(WFSMergeQueue(), ^
 					{
 						allApps = [merged allValues];
@@ -527,7 +527,6 @@ static NSString* const WFSPurchasedCellIdentifier = @"WFSPurchasedCellIdentifier
 		[weakSelf.imageCache setObject:image forKey:urlString];
 		dispatch_async(dispatch_get_main_queue(), ^
 		{
-			__strong typeof(weakSelf) self = weakSelf;
 			if (cell.tag == row)
 			{
 				cell.imageView.image = image;
