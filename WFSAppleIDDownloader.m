@@ -9,8 +9,24 @@ static NSString* const kWFSLegacyAuthEndpoint = @"https://buy.itunes.apple.com/W
 static NSString* const kWFSInitBagEndpoint = @"https://init.itunes.apple.com/bag.xml?guid=%@";
 static NSString* const kWFSBuyHost = @"buy.itunes.apple.com";
 
+static const NSInteger kWFSMaxRedirects = 5;
+static const NSInteger kWFSMaxAuthAttempts = 24;
+
+@interface WFSAppleIDBlockingRedirectDelegate : NSObject <NSURLSessionTaskDelegate>
+@end
+
+@implementation WFSAppleIDBlockingRedirectDelegate
+
+- (void)URLSession:(NSURLSession*)session task:(NSURLSessionTask*)task willPerformHTTPRedirection:(NSHTTPURLResponse*)response newRequest:(NSURLRequest*)request completionHandler:(void (^)(NSURLRequest* _Nullable))completionHandler
+{
+	completionHandler(nil);
+}
+
+@end
+
 @interface WFSAppleIDDownloader ()
 @property (nonatomic, strong) NSURLSession* session;
+@property (nonatomic, strong) WFSAppleIDBlockingRedirectDelegate* redirectDelegate;
 @property (nonatomic, copy) NSString* guid;
 @property (nonatomic, copy) NSString* appleId;
 @property (nonatomic, copy) NSString* password;
@@ -40,10 +56,11 @@ static NSString* const kWFSBuyHost = @"buy.itunes.apple.com";
 	self = [super init];
 	if (self)
 	{
+		_redirectDelegate = [WFSAppleIDBlockingRedirectDelegate new];
 		NSURLSessionConfiguration* config = [NSURLSessionConfiguration defaultSessionConfiguration];
-		config.timeoutIntervalForRequest = 30;
-		config.timeoutIntervalForResource = 60;
-		_session = [NSURLSession sessionWithConfiguration:config];
+		config.timeoutIntervalForRequest = 60;
+		config.timeoutIntervalForResource = 120;
+		_session = [NSURLSession sessionWithConfiguration:config delegate:_redirectDelegate delegateQueue:nil];
 	}
 	return self;
 }
@@ -156,8 +173,17 @@ static NSString* const kWFSBuyHost = @"buy.itunes.apple.com";
 
 - (void)tryAuthenticateWithAttempt:(NSInteger)attempt completion:(WFSAppleIDAuthCompletion)completion
 {
+	NSMutableArray* diagnostics = [NSMutableArray array];
 	[self resolveFastAuthEndpoint:^(NSString* resolvedEndpoint)
 	{
+		if (resolvedEndpoint.length)
+		{
+			[diagnostics addObject:[NSString stringWithFormat:@"bag.xml -> %@", resolvedEndpoint]];
+		}
+		else
+		{
+			[diagnostics addObject:@"bag.xml: no authenticateAccount key, using built-in endpoints"];
+		}
 		NSMutableArray* candidates = [NSMutableArray array];
 		if (resolvedEndpoint.length)
 		{
@@ -166,7 +192,7 @@ static NSString* const kWFSBuyHost = @"buy.itunes.apple.com";
 		[candidates addObject:kWFSFastAuthEndpoint];
 		[candidates addObject:[NSString stringWithFormat:@"%@?guid=%@", kWFSLegacyAuthEndpoint, self.guid]];
 		[candidates addObject:kWFSLegacyAuthEndpoint];
-		[self tryAuthEndpointCandidates:candidates index:0 attempt:attempt completion:completion];
+		[self tryAuthEndpointCandidates:candidates index:0 attempt:attempt retryCount:0 diagnostics:diagnostics completion:completion];
 	}];
 }
 
@@ -201,14 +227,14 @@ static NSString* const kWFSBuyHost = @"buy.itunes.apple.com";
 	}] resume];
 }
 
-- (void)tryAuthEndpointCandidates:(NSArray*)candidates index:(NSUInteger)index attempt:(NSInteger)attempt completion:(WFSAppleIDAuthCompletion)completion
+- (void)tryAuthEndpointCandidates:(NSArray*)candidates index:(NSUInteger)index attempt:(NSInteger)attempt retryCount:(NSInteger)retryCount diagnostics:(NSMutableArray*)diagnostics completion:(WFSAppleIDAuthCompletion)completion
 {
-	if (index >= candidates.count)
+	if (retryCount >= kWFSMaxAuthAttempts)
 	{
-		[self finishAuth:completion error:[self errorWithCode:WFSAppleIDDownloaderErrorAuthenticationFailed message:@"Could not reach Apple's authentication servers."]];
+		[self finishAuth:completion error:[self authExhaustedErrorWithDiagnostics:diagnostics]];
 		return;
 	}
-	NSString* candidate = candidates[index];
+	NSString* candidate = candidates[index % candidates.count];
 	NSDictionary* body = @{
 		@"appleId": self.appleId,
 		@"password": self.password,
@@ -221,22 +247,61 @@ static NSString* const kWFSBuyHost = @"buy.itunes.apple.com";
 	{
 		if (error || !data.length)
 		{
-			[self tryAuthEndpointCandidates:candidates index:index + 1 attempt:attempt completion:completion];
+			NSString* detail = error ? [NSString stringWithFormat:@"transport error: %@", error.localizedDescription] : @"empty response body";
+			[diagnostics addObject:[NSString stringWithFormat:@"POST %@ -> %@ (%@)", candidate, response ? [NSString stringWithFormat:@"HTTP %ld", (long)response.statusCode] : @"no response", detail]];
+			[self retryAuthWithCandidates:candidates index:index + 1 attempt:attempt retryCount:retryCount diagnostics:diagnostics completion:completion];
 			return;
 		}
+		[diagnostics addObject:[NSString stringWithFormat:@"POST %@ -> HTTP %ld (%lu bytes)", candidate, (long)response.statusCode, (unsigned long)data.length]];
 		NSError* processError = [self processAuthResponseData:data httpResponse:response];
 		if (!processError)
 		{
 			[self finishAuth:completion error:nil];
 			return;
 		}
-		if (processError.code == WFSAppleIDDownloaderError2FARequired || processError.code == WFSAppleIDDownloaderErrorAuthenticationFailed || processError.code == WFSAppleIDDownloaderErrorBrowserSignInRequired)
+		if (processError.code == WFSAppleIDDownloaderError2FARequired || processError.code == WFSAppleIDDownloaderErrorBrowserSignInRequired)
 		{
 			[self finishAuth:completion error:processError];
 			return;
 		}
-		[self tryAuthEndpointCandidates:candidates index:index + 1 attempt:attempt completion:completion];
+		[diagnostics addObject:[NSString stringWithFormat:@"  unusable response: %@", processError.localizedDescription]];
+		[self retryAuthWithCandidates:candidates index:index + 1 attempt:attempt retryCount:retryCount diagnostics:diagnostics completion:completion];
 	}];
+}
+
+- (void)retryAuthWithCandidates:(NSArray*)candidates index:(NSUInteger)index attempt:(NSInteger)attempt retryCount:(NSInteger)retryCount diagnostics:(NSMutableArray*)diagnostics completion:(WFSAppleIDAuthCompletion)completion
+{
+	dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)), dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+		[self tryAuthEndpointCandidates:candidates index:index attempt:attempt retryCount:retryCount + 1 diagnostics:diagnostics completion:completion];
+	});
+}
+
+- (NSError*)authExhaustedErrorWithDiagnostics:(NSMutableArray*)diagnostics
+{
+	NSString* logPath = [[NSHomeDirectory() stringByAppendingPathComponent:@"Documents"] stringByAppendingPathComponent:@"WaffleStore_appleid.log"];
+	NSString* logContents = [NSString stringWithFormat:@"WaffleStore Apple ID sign-in diagnostics\n%@\n", [NSDate date]];
+	for (NSString* line in diagnostics)
+	{
+		logContents = [logContents stringByAppendingFormat:@"%@\n", line];
+	}
+	[logContents writeToFile:logPath atomically:YES encoding:NSUTF8StringEncoding error:nil];
+
+	BOOL anyServerResponse = NO;
+	for (NSString* line in diagnostics)
+	{
+		if ([line containsString:@"HTTP"])
+		{
+			anyServerResponse = YES;
+			break;
+		}
+	}
+	if (anyServerResponse)
+	{
+		NSString* message = [NSString stringWithFormat:@"Apple's servers were reached but did not return a valid sign-in response after %ld attempts. This can happen during peak times — try again in a minute, and check the Apple ID and password. Details were saved to WaffleStore_appleid.log in the Files app.", (long)kWFSMaxAuthAttempts];
+		return [self errorWithCode:WFSAppleIDDownloaderErrorAuthenticationFailed message:message];
+	}
+	NSString* message = @"Could not reach Apple's authentication servers. Check your internet connection and try again. Details were saved to WaffleStore_appleid.log in the Files app.";
+	return [self errorWithCode:WFSAppleIDDownloaderErrorNetwork message:message];
 }
 
 - (NSError*)processAuthResponseData:(NSData*)data httpResponse:(NSHTTPURLResponse*)httpResponse
