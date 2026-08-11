@@ -2,4 +2,6 @@
 packages/
 output/
 *.tipa
+*.ipa
 .DS_Store
+dist/
