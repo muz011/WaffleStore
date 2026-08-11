@@ -26,10 +26,18 @@ jobs:
           cd $GITHUB_WORKSPACE
           FINALPACKAGE=1 gmake clean package
           mkdir -p ./output
-          mv ./packages/*.ipa ./output/WaffleStore-$(git rev-parse --short HEAD).ipa
+          SHORT=$(git rev-parse --short HEAD)
+          mv ./packages/*.ipa ./output/WaffleStore-$SHORT.ipa
+          cp ./output/WaffleStore-$SHORT.ipa ./output/WaffleStore.tipa
 
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
           name: WaffleStore IPA
           path: ./output/*.ipa
+
+      - name: Upload Tipa Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: WaffleStore TIPA
+          path: ./output/WaffleStore.tipa
