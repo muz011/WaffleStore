@@ -110,18 +110,26 @@
 
 - (void)showPurchasedApps
 {
-	WFSPurchasedAppsViewController* purchasesViewController = [[WFSPurchasedAppsViewController alloc] initWithSelectionHandler:^(long long appId, NSDictionary* metadataPlist)
+	@try
 	{
-		[self getAllAppVersionIdsAndPrompt:appId metadataPlist:metadataPlist];
-	}];
-	if (self.navigationController)
-	{
-		[self.navigationController pushViewController:purchasesViewController animated:YES];
+		WFSPurchasedAppsViewController* purchasesViewController = [[WFSPurchasedAppsViewController alloc] initWithSelectionHandler:^(long long appId, NSDictionary* metadataPlist)
+		{
+			[self getAllAppVersionIdsAndPrompt:appId metadataPlist:metadataPlist];
+		}];
+		if (self.navigationController)
+		{
+			[self.navigationController pushViewController:purchasesViewController animated:YES];
+		}
+		else
+		{
+			UINavigationController* nav = [[UINavigationController alloc] initWithRootViewController:purchasesViewController];
+			[self presentViewController:nav animated:YES completion:nil];
+		}
 	}
-	else
+	@catch (NSException* exception)
 	{
-		UINavigationController* nav = [[UINavigationController alloc] initWithRootViewController:purchasesViewController];
-		[self presentViewController:nav animated:YES completion:nil];
+		NSLog(@"[WaffleStore] Purchases: showPurchasedApps exception %@ %@", exception.name, exception.reason);
+		[self showAlert:@"Error" message:[NSString stringWithFormat:@"Could not open purchases (%@).", exception.reason ?: exception.name]];
 	}
 }
 

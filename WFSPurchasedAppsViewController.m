@@ -2,6 +2,17 @@
 #import "WFSAppleStore.h"
 #import "CoreServices.h"
 
+static dispatch_queue_t WFSMergeQueue(void)
+{
+	static dispatch_queue_t queue;
+	static dispatch_once_t onceToken;
+	dispatch_once(&onceToken, ^
+	{
+		queue = dispatch_queue_create("dev.muz011.wafflestore.merge", NULL);
+	});
+	return queue;
+}
+
 @interface WFSPurchasedAppsViewController ()
 @property (nonatomic, copy) void (^selectionHandler)(long long appId, NSDictionary* metadataPlist);
 @property (nonatomic, strong) NSMutableArray* allApps;
@@ -15,6 +26,7 @@
 @property (nonatomic, strong) UILabel* statusLabel;
 @property (nonatomic, strong) UIActivityIndicatorView* spinner;
 @property (nonatomic, assign) BOOL loading;
+@property (nonatomic, assign) BOOL didAppear;
 @end
 
 static NSString* const WFSPurchasedCellIdentifier = @"WFSPurchasedCellIdentifier";
@@ -50,8 +62,16 @@ static NSString* const WFSPurchasedCellIdentifier = @"WFSPurchasedCellIdentifier
 	UIRefreshControl* refreshControl = [UIRefreshControl new];
 	[refreshControl addTarget:self action:@selector(loadPurchases) forControlEvents:UIControlEventValueChanged];
 	self.refreshControl = refreshControl;
+}
 
-	[self loadPurchases];
+- (void)viewDidAppear:(BOOL)animated
+{
+	[super viewDidAppear:animated];
+	if (!self.didAppear)
+	{
+		self.didAppear = YES;
+		[self loadPurchases];
+	}
 }
 
 - (void)setupHeaderView
@@ -100,92 +120,190 @@ static NSString* const WFSPurchasedCellIdentifier = @"WFSPurchasedCellIdentifier
 	}
 }
 
+- (void)handleStoreUnavailable:(NSString*)message
+{
+	[self setLoading:NO];
+	self.accountLabel.text = @"Not signed in";
+	self.statusLabel.hidden = NO;
+	self.statusLabel.text = message;
+	[self showError:@"Apple ID Unavailable" message:message];
+}
+
 - (void)loadPurchases
 {
+	NSLog(@"[WaffleStore] Purchases: loadPurchases begin");
 	if (self.loading)
 	{
 		[self.refreshControl endRefreshing];
 		return;
 	}
-	SSAccountStore* accountStore = [SSAccountStore defaultStore];
-	SSAccount* account = accountStore.activeAccount;
-	if (!account)
+	@try
 	{
-		[self.refreshControl endRefreshing];
-		[self promptSignIn];
-		return;
-	}
-	self.accountLabel.text = [NSString stringWithFormat:@"Signed in as: %@", account.accountName.length ? account.accountName : @"Apple ID"];
-	self.statusLabel.hidden = NO;
-	self.statusLabel.text = @"Loading purchases…";
-	self.statusLabel.textColor = [UIColor secondaryLabelColor];
-	[self setLoading:YES];
-
-	long long dsid = [account.uniqueIdentifier longLongValue];
-	if (dsid == 0)
-	{
-		NSNumber* kvcDsid = [account valueForKey:@"dsid"];
-		dsid = [kvcDsid longLongValue];
-	}
-	if (dsid == 0)
-	{
-		[self setLoading:NO];
-		[self showError:@"Account Error" message:@"Could not read the Apple ID for the signed-in account."];
-		return;
-	}
-
-	ASDPurchaseHistory* history = [ASDPurchaseHistory sharedInstance];
-	if (!history)
-	{
-		[self setLoading:NO];
-		[self showError:@"Purchase History Unavailable" message:@"The App Store purchase library service could not be started."];
-		return;
-	}
-	__weak typeof(self) weakSelf = self;
-	[history updateForAccountID:dsid withCompletionHandler:^(NSError* error)
-	{
-		__strong typeof(weakSelf) self = weakSelf;
-		if (error)
+		Class accountStoreClass = NSClassFromString(@"SSAccountStore");
+		if (!accountStoreClass || ![accountStoreClass respondsToSelector:@selector(defaultStore)])
 		{
-			dispatch_async(dispatch_get_main_queue(), ^
-			{
-				[self setLoading:NO];
-				[self showError:@"Purchase History Unavailable" message:error.localizedDescription];
-			});
+			NSLog(@"[WaffleStore] Purchases: SSAccountStore unavailable");
+			[self handleStoreUnavailable:@"The App Store account service is unavailable on this iOS version."];
 			return;
 		}
-		[self runHistoryQueriesWithDSID:dsid];
-	}];
+		id accountStore = [accountStoreClass defaultStore];
+		id account = nil;
+		if (accountStore && [accountStore respondsToSelector:@selector(activeAccount)])
+		{
+			account = [accountStore activeAccount];
+		}
+		NSLog(@"[WaffleStore] Purchases: activeAccount = %@", account);
+		if (!account)
+		{
+			[self.refreshControl endRefreshing];
+			[self promptSignIn];
+			return;
+		}
+
+		NSString* accountName = nil;
+		if ([account respondsToSelector:@selector(accountName)])
+		{
+			accountName = [account accountName];
+		}
+		self.accountLabel.text = [NSString stringWithFormat:@"Signed in as: %@", accountName.length ? accountName : @"Apple ID"];
+		self.statusLabel.hidden = NO;
+		self.statusLabel.text = @"Loading purchases…";
+		self.statusLabel.textColor = [UIColor secondaryLabelColor];
+		[self setLoading:YES];
+
+		long long dsid = 0;
+		if ([account respondsToSelector:@selector(uniqueIdentifier)])
+		{
+			NSNumber* uniqueIdentifier = [account uniqueIdentifier];
+			dsid = [uniqueIdentifier longLongValue];
+		}
+		if (dsid == 0 && [account respondsToSelector:NSSelectorFromString(@"dsid")])
+		{
+			dsid = [[account valueForKey:@"dsid"] longLongValue];
+		}
+		NSLog(@"[WaffleStore] Purchases: dsid = %lld", dsid);
+		if (dsid == 0)
+		{
+			[self setLoading:NO];
+			[self showError:@"Account Error" message:@"Could not read the Apple ID for the signed-in account."];
+			return;
+		}
+
+		Class historyClass = NSClassFromString(@"ASDPurchaseHistory");
+		if (!historyClass || ![historyClass respondsToSelector:@selector(sharedInstance)])
+		{
+			[self setLoading:NO];
+			[self showError:@"Purchase History Unavailable" message:@"The App Store purchase library service is unavailable on this iOS version."];
+			return;
+		}
+		id history = [historyClass sharedInstance];
+		if (![history respondsToSelector:@selector(updateForAccountID:withCompletionHandler:)])
+		{
+			[self setLoading:NO];
+			[self showError:@"Purchase History Unavailable" message:@"The App Store purchase library service is unavailable on this iOS version."];
+			return;
+		}
+		__weak typeof(self) weakSelf = self;
+		[history updateForAccountID:dsid withCompletionHandler:^(NSError* error)
+		{
+			@try
+			{
+				__strong typeof(weakSelf) self = weakSelf;
+				NSLog(@"[WaffleStore] Purchases: updateForAccountID error = %@", error);
+				if (error)
+				{
+					dispatch_async(dispatch_get_main_queue(), ^
+					{
+						[self setLoading:NO];
+						[self showError:@"Purchase History Unavailable" message:error.localizedDescription];
+					});
+					return;
+				}
+				[self runHistoryQueriesWithDSID:dsid];
+			}
+			@catch (NSException* exception)
+			{
+				NSLog(@"[WaffleStore] Purchases: update exception %@ %@", exception.name, exception.reason);
+			}
+		}];
+	}
+	@catch (NSException* exception)
+	{
+		NSLog(@"[WaffleStore] Purchases: exception %@ %@", exception.name, exception.reason);
+		[self handleStoreUnavailable:[NSString stringWithFormat:@"The App Store account service failed (%@).", exception.reason ?: exception.name]];
+	}
 }
 
 - (void)runHistoryQueriesWithDSID:(long long)dsid
 {
-	ASDPurchaseHistory* history = [ASDPurchaseHistory sharedInstance];
-	NSMutableDictionary* merged = [NSMutableDictionary new];
+	Class historyClass = NSClassFromString(@"ASDPurchaseHistory");
+	Class queryClass = NSClassFromString(@"ASDPurchaseHistoryQuery");
+	if (!historyClass || !queryClass)
+	{
+		dispatch_async(dispatch_get_main_queue(), ^
+		{
+			[self setLoading:NO];
+			[self showError:@"Purchase History Unavailable" message:@"The App Store purchase library service is unavailable on this iOS version."];
+		});
+		return;
+	}
+		id history = [historyClass sharedInstance];
+		if (![history respondsToSelector:@selector(executeQuery:withResultHandler:)])
+		{
+			dispatch_async(dispatch_get_main_queue(), ^
+			{
+				[self setLoading:NO];
+				[self showError:@"Purchase History Unavailable" message:@"The App Store purchase library service is unavailable on this iOS version."];
+			});
+			return;
+		}
+		__block NSMutableDictionary* merged = [NSMutableDictionary new];
 	__block NSInteger pending = 2;
 	__weak typeof(self) weakSelf = self;
 	for (long long hiddenValue = 0; hiddenValue <= 1; hiddenValue++)
 	{
-		ASDPurchaseHistoryQuery* query = [ASDPurchaseHistoryQuery new];
-		query.accountID = dsid;
-		query.isHidden = hiddenValue;
+		id query = [[queryClass alloc] init];
+		if ([query respondsToSelector:@selector(setAccountID:)])
+		{
+			[query setAccountID:dsid];
+		}
+		if ([query respondsToSelector:@selector(setIsHidden:)])
+		{
+			[query setIsHidden:hiddenValue];
+		}
 		[history executeQuery:query withResultHandler:^(NSArray* apps, NSError* error)
 		{
-			__strong typeof(weakSelf) self = weakSelf;
-			if (!error)
+			@try
 			{
-				for (ASDPurchaseHistoryApp* app in apps)
+				__strong typeof(weakSelf) self = weakSelf;
+				NSLog(@"[WaffleStore] Purchases: executeQuery(hidden=%lld) apps=%lu error=%@", hiddenValue, (unsigned long)apps.count, error);
+				if (!error)
 				{
-					if (app.storeItemID > 0 && app.bundleID.length > 0)
+					dispatch_sync(WFSMergeQueue(), ^
 					{
-						merged[@(app.storeItemID)] = app;
-					}
+						for (ASDPurchaseHistoryApp* app in apps)
+						{
+							if (app.storeItemID > 0 && app.bundleID.length > 0)
+							{
+								merged[@(app.storeItemID)] = app;
+							}
+						}
+					});
+				}
+				pending--;
+				if (pending == 0)
+				{
+					NSArray* allApps = nil;
+					dispatch_sync(WFSMergeQueue(), ^
+					{
+						allApps = [merged allValues];
+					});
+					[self allHistoryLoaded:allApps];
 				}
 			}
-			pending--;
-			if (pending == 0)
+			@catch (NSException* exception)
 			{
-				[self allHistoryLoaded:[merged allValues]];
+				NSLog(@"[WaffleStore] Purchases: execute exception %@ %@", exception.name, exception.reason);
 			}
 		}];
 	}
@@ -428,29 +546,56 @@ static NSString* const WFSPurchasedCellIdentifier = @"WFSPurchasedCellIdentifier
 		[self performSystemSignIn];
 	}]];
 	[alert addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil]];
-	[self presentViewController:alert animated:YES completion:nil];
+	if (self.isViewLoaded && self.view.window)
+	{
+		[self presentViewController:alert animated:YES completion:nil];
+	}
 }
 
 - (void)performSystemSignIn
 {
-	self.accountLabel.text = @"Signing in…";
-	SSAuthenticationContext* context = [SSAuthenticationContext contextForSignIn];
-	SSAuthenticateRequest* request = [[SSAuthenticateRequest alloc] initWithAuthenticationContext:context];
-	__weak typeof(self) weakSelf = self;
-	[request startWithAuthenticateResponseBlock:^(id response, NSError* error)
+	@try
 	{
-		__strong typeof(weakSelf) self = weakSelf;
-		dispatch_async(dispatch_get_main_queue(), ^
+		Class contextClass = NSClassFromString(@"SSAuthenticationContext");
+		Class requestClass = NSClassFromString(@"SSAuthenticateRequest");
+		if (!contextClass || !requestClass || ![contextClass respondsToSelector:@selector(contextForSignIn)])
 		{
-			if (error)
+			[self handleStoreUnavailable:@"The App Store sign-in service is unavailable on this iOS version."];
+			return;
+		}
+		self.accountLabel.text = @"Signing in…";
+		id context = [contextClass contextForSignIn];
+		id request = nil;
+		if ([requestClass instancesRespondToSelector:@selector(initWithAuthenticationContext:)])
+		{
+			request = [[requestClass alloc] initWithAuthenticationContext:context];
+		}
+		if (!request || ![request respondsToSelector:@selector(startWithAuthenticateResponseBlock:)])
+		{
+			[self handleStoreUnavailable:@"The App Store sign-in service is unavailable on this iOS version."];
+			return;
+		}
+		__weak typeof(self) weakSelf = self;
+		[request startWithAuthenticateResponseBlock:^(id response, NSError* error)
+		{
+			__strong typeof(weakSelf) self = weakSelf;
+			dispatch_async(dispatch_get_main_queue(), ^
 			{
-				self.accountLabel.text = @"Not signed in";
-				[self showError:@"Sign-In Failed" message:error.localizedDescription];
-				return;
-			}
-			[self loadPurchases];
-		});
-	}];
+				if (error)
+				{
+					self.accountLabel.text = @"Not signed in";
+					[self showError:@"Sign-In Failed" message:error.localizedDescription];
+					return;
+				}
+				[self loadPurchases];
+			});
+		}];
+	}
+	@catch (NSException* exception)
+	{
+		NSLog(@"[WaffleStore] Purchases: sign-in exception %@ %@", exception.name, exception.reason);
+		[self handleStoreUnavailable:@"The App Store sign-in service failed."];
+	}
 }
 
 - (void)showError:(NSString*)title message:(NSString*)message
@@ -459,7 +604,10 @@ static NSString* const WFSPurchasedCellIdentifier = @"WFSPurchasedCellIdentifier
 	{
 		UIAlertController* alert = [UIAlertController alertControllerWithTitle:title message:message preferredStyle:UIAlertControllerStyleAlert];
 		[alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
-		[self presentViewController:alert animated:YES completion:nil];
+		if (self.isViewLoaded && self.view.window)
+		{
+			[self presentViewController:alert animated:YES completion:nil];
+		}
 	});
 }
 
