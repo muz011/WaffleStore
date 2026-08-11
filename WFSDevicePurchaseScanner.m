@@ -6,10 +6,8 @@ NSString* const WFSDevicePurchaseBundleIDKey = @"bundleID";
 NSString* const WFSDevicePurchaseTitleKey = @"title";
 NSString* const WFSDevicePurchaseDateKey = @"datePurchased";
 NSString* const WFSDevicePurchaseSourceKey = @"source";
-NSString* const WFSDevicePurchaseSourceApplicationState = @"applicationState";
 NSString* const WFSDevicePurchaseSourceMediaLibrary = @"mediaLibrary";
 
-static NSString* const WFSApplicationStateDBPath = @"/var/mobile/Library/FrontBoard/applicationState.db";
 static NSString* const WFSMediaLibraryDBPath = @"/var/mobile/Media/iTunes_Control/iTunes/MediaLibrary.sqlitedb";
 
 @implementation WFSDevicePurchaseScanner
@@ -17,50 +15,8 @@ static NSString* const WFSMediaLibraryDBPath = @"/var/mobile/Media/iTunes_Contro
 + (NSArray<NSDictionary*>*)scanPurchasesForDSID:(long long)dsid
 {
 	NSMutableDictionary* merged = [NSMutableDictionary dictionary];
-	[self scanApplicationStateInto:merged];
 	[self scanMediaLibraryForDSID:dsid into:merged];
 	return [merged allValues];
-}
-
-+ (void)scanApplicationStateInto:(NSMutableDictionary*)merged
-{
-	sqlite3* db = NULL;
-	if (sqlite3_open_v2(WFSApplicationStateDBPath.UTF8String, &db, SQLITE_OPEN_READONLY, NULL) != SQLITE_OK)
-	{
-		NSLog(@"[WaffleStore] Scanner: cannot open applicationState.db: %s", sqlite3_errmsg(db));
-		if (db)
-		{
-			sqlite3_close(db);
-		}
-		return;
-	}
-	sqlite3_stmt* stmt = NULL;
-	if (sqlite3_prepare_v2(db, "SELECT application_identifier FROM application_identifier_tab", -1, &stmt, NULL) == SQLITE_OK)
-	{
-		while (sqlite3_step(stmt) == SQLITE_ROW)
-		{
-			const unsigned char* text = sqlite3_column_text(stmt, 0);
-			if (!text)
-			{
-				continue;
-			}
-			NSString* bundleID = [NSString stringWithUTF8String:(const char*)text];
-			if (!bundleID.length)
-			{
-				continue;
-			}
-			merged[bundleID] = @{
-				WFSDevicePurchaseBundleIDKey: bundleID,
-				WFSDevicePurchaseSourceKey: WFSDevicePurchaseSourceApplicationState,
-			};
-		}
-	}
-	else
-	{
-		NSLog(@"[WaffleStore] Scanner: applicationState query failed: %s", sqlite3_errmsg(db));
-	}
-	sqlite3_finalize(stmt);
-	sqlite3_close(db);
 }
 
 + (void)scanMediaLibraryForDSID:(long long)dsid into:(NSMutableDictionary*)merged

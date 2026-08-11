@@ -5,7 +5,6 @@ extern NSString* const WFSDevicePurchaseBundleIDKey;
 extern NSString* const WFSDevicePurchaseTitleKey;
 extern NSString* const WFSDevicePurchaseDateKey;
 extern NSString* const WFSDevicePurchaseSourceKey;
-extern NSString* const WFSDevicePurchaseSourceApplicationState;
 extern NSString* const WFSDevicePurchaseSourceMediaLibrary;
 
 @interface WFSDevicePurchaseScanner : NSObject

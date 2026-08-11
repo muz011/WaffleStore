@@ -62,6 +62,7 @@ static NSString* const WFSPurchasedCellIdentifier = @"WFSPurchasedCellIdentifier
 	[self setupHeaderView];
 
 	self.navigationItem.rightBarButtonItem = [[UIBarButtonItem alloc] initWithBarButtonSystemItem:UIBarButtonSystemItemRefresh target:self action:@selector(loadPurchases)];
+	self.navigationItem.leftBarButtonItem = [[UIBarButtonItem alloc] initWithBarButtonSystemItem:UIBarButtonSystemItemAdd target:self action:@selector(addAppManually)];
 
 	UIRefreshControl* refreshControl = [UIRefreshControl new];
 	[refreshControl addTarget:self action:@selector(loadPurchases) forControlEvents:UIControlEventValueChanged];
@@ -385,52 +386,21 @@ static NSString* const WFSPurchasedCellIdentifier = @"WFSPurchasedCellIdentifier
 		__strong typeof(weakSelf) self = weakSelf;
 		NSMutableArray* all = [NSMutableArray arrayWithArray:apps];
 		NSMutableSet* seenStoreIDs = [NSMutableSet new];
-		NSMutableSet* seenBundleIDs = [NSMutableSet new];
 		for (ASDPurchaseHistoryApp* app in apps)
 		{
 			if (app.storeItemID > 0)
 			{
 				[seenStoreIDs addObject:@(app.storeItemID)];
 			}
-			if (app.bundleID.length > 0)
-			{
-				[seenBundleIDs addObject:app.bundleID];
-			}
 		}
 		NSMutableSet* localScanned = [NSMutableSet new];
-		__block NSInteger resolveBudget = 20;
 		NSArray* scanned = [WFSDevicePurchaseScanner scanPurchasesForDSID:dsid];
-		for (__strong NSDictionary* entry in scanned)
+		for (NSDictionary* entry in scanned)
 		{
 			NSNumber* storeID = entry[WFSDevicePurchaseStoreIDKey];
-			NSString* bundleID = entry[WFSDevicePurchaseBundleIDKey];
 			if (storeID && [seenStoreIDs containsObject:storeID])
 			{
 				continue;
-			}
-			if (bundleID.length && [seenBundleIDs containsObject:bundleID])
-			{
-				continue;
-			}
-			if (bundleID.length && [self.installedBundleIDs containsObject:bundleID])
-			{
-				continue;
-			}
-			if (!storeID && bundleID.length && resolveBudget > 0)
-			{
-				resolveBudget--;
-				NSNumber* resolved = [self resolveStoreIDForBundleID:bundleID];
-				if (resolved)
-				{
-					storeID = resolved;
-					if ([seenStoreIDs containsObject:storeID])
-					{
-						continue;
-					}
-					NSMutableDictionary* enriched = [entry mutableCopy];
-					enriched[WFSDevicePurchaseStoreIDKey] = storeID;
-					entry = enriched;
-				}
 			}
 			ASDPurchaseHistoryApp* app = [self historyAppFromScannedEntry:entry];
 			if (!app)
@@ -438,15 +408,10 @@ static NSString* const WFSPurchasedCellIdentifier = @"WFSPurchasedCellIdentifier
 				continue;
 			}
 			[all addObject:app];
-			NSString* key = bundleID.length ? bundleID : [NSString stringWithFormat:@"id:%@", storeID];
-			[localScanned addObject:key];
+			[localScanned addObject:[NSString stringWithFormat:@"id:%@", storeID]];
 			if (storeID)
 			{
 				[seenStoreIDs addObject:storeID];
-			}
-			if (bundleID.length)
-			{
-				[seenBundleIDs addObject:bundleID];
 			}
 		}
 		dispatch_async(dispatch_get_main_queue(), ^
@@ -520,18 +485,99 @@ static NSString* const WFSPurchasedCellIdentifier = @"WFSPurchasedCellIdentifier
 	}
 }
 
-- (NSNumber*)resolveStoreIDForBundleID:(NSString*)bundleID
+- (void)addAppManually
+{
+	UIAlertController* alert = [UIAlertController alertControllerWithTitle:@"Add App" message:@"Enter an App ID, an App Store link, or a Bundle ID. WaffleStore will ask the App Store to purchase or download it for your signed-in Apple ID." preferredStyle:UIAlertControllerStyleAlert];
+	[alert addTextFieldWithConfigurationHandler:^(UITextField* textField)
+	{
+		textField.placeholder = @"e.g. 1053533457 or com.example.app";
+		textField.autocapitalizationType = UITextAutocapitalizationTypeNone;
+		textField.autocorrectionType = UITextAutocorrectionTypeNo;
+		textField.keyboardType = UIKeyboardTypeDefault;
+	}];
+	[alert addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil]];
+	[alert addAction:[UIAlertAction actionWithTitle:@"Add" style:UIAlertActionStyleDefault handler:^(UIAlertAction* action)
+	{
+		NSString* input = [alert.textFields.firstObject.text stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+		if (input.length == 0)
+		{
+			return;
+		}
+		[self resolveInputAndStartDownload:input];
+	}]];
+	[self presentViewController:alert animated:YES completion:nil];
+}
+
+- (void)resolveInputAndStartDownload:(NSString*)input
+{
+	long long appId = [self parseAppIdFromInput:input];
+	if (appId > 0)
+	{
+		[self startDownloadFlowForAppId:appId];
+		return;
+	}
+	NSString* bundleID = input;
+	if (bundleID.length == 0)
+	{
+		[self showAddError:@"Enter an App ID, an App Store link, or a Bundle ID."];
+		return;
+	}
+	[self showResolvingIndicatorForInput:input];
+	[self lookupStoreIDForBundleID:bundleID completion:^(long long resolvedAppId)
+	{
+		[self dismissViewControllerAnimated:NO completion:nil];
+		if (resolvedAppId > 0)
+		{
+			[self startDownloadFlowForAppId:resolvedAppId];
+		}
+		else
+		{
+			[self showAddError:@"No App Store app found for that Bundle ID. Check the spelling and try again."];
+		}
+	}];
+}
+
+- (long long)parseAppIdFromInput:(NSString*)input
+{
+	NSCharacterSet* digits = [NSCharacterSet decimalDigitCharacterSet];
+	if ([input rangeOfCharacterFromSet:digits.invertedSet].location == NSNotFound && input.length > 0)
+	{
+		return [input longLongValue];
+	}
+	NSRange idRange = [input rangeOfString:@"id" options:NSCaseInsensitiveSearch];
+	if (idRange.location == NSNotFound)
+	{
+		return 0;
+	}
+	NSUInteger start = idRange.location + idRange.length;
+	NSMutableString* number = [NSMutableString new];
+	for (NSUInteger i = start; i < input.length; i++)
+	{
+		unichar c = [input characterAtIndex:i];
+		if (c >= '0' && c <= '9')
+		{
+			[number appendFormat:@"%C", c];
+		}
+		else
+		{
+			break;
+		}
+	}
+	return number.length ? [number longLongValue] : 0;
+}
+
+- (void)lookupStoreIDForBundleID:(NSString*)bundleID completion:(void (^)(long long appId))completion
 {
 	NSString* encoded = [bundleID stringByAddingPercentEncodingWithAllowedCharacters:[NSCharacterSet URLQueryAllowedCharacterSet]];
 	NSURL* url = [NSURL URLWithString:[NSString stringWithFormat:@"https://itunes.apple.com/lookup?bundleId=%@&limit=1&media=software", encoded]];
 	if (!url)
 	{
-		return nil;
+		completion(0);
+		return;
 	}
-	__block NSNumber* result = nil;
-	dispatch_semaphore_t semaphore = dispatch_semaphore_create(0);
 	NSURLSessionDataTask* task = [[NSURLSession sharedSession] dataTaskWithURL:url completionHandler:^(NSData* data, NSURLResponse* response, NSError* error)
 	{
+		long long trackId = 0;
 		if (!error && data.length)
 		{
 			NSDictionary* json = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
@@ -539,20 +585,46 @@ static NSString* const WFSPurchasedCellIdentifier = @"WFSPurchasedCellIdentifier
 			{
 				if ([item isKindOfClass:[NSDictionary class]])
 				{
-					NSNumber* trackId = item[@"trackId"];
-					if (trackId && [trackId longLongValue] > 0)
+					NSNumber* candidate = item[@"trackId"];
+					if (candidate && [candidate longLongValue] > 0)
 					{
-						result = trackId;
+						trackId = [candidate longLongValue];
 						break;
 					}
 				}
 			}
 		}
-		dispatch_semaphore_signal(semaphore);
+		dispatch_async(dispatch_get_main_queue(), ^
+		{
+			completion(trackId);
+		});
 	}];
 	[task resume];
-	dispatch_semaphore_wait(semaphore, dispatch_time(DISPATCH_TIME_NOW, (int64_t)(5 * NSEC_PER_SEC)));
-	return result;
+}
+
+- (void)showResolvingIndicatorForInput:(NSString*)input
+{
+	UIAlertController* alert = [UIAlertController alertControllerWithTitle:@"Resolving" message:[NSString stringWithFormat:@"Looking up \"%@\" in the App Store…", input] preferredStyle:UIAlertControllerStyleAlert];
+	[self presentViewController:alert animated:YES completion:nil];
+	dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(12 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^
+	{
+		[alert dismissViewControllerAnimated:YES completion:nil];
+	});
+}
+
+- (void)startDownloadFlowForAppId:(long long)appId
+{
+	if (self.selectionHandler)
+	{
+		self.selectionHandler(appId, nil);
+	}
+}
+
+- (void)showAddError:(NSString*)message
+{
+	UIAlertController* alert = [UIAlertController alertControllerWithTitle:@"Add App" message:message preferredStyle:UIAlertControllerStyleAlert];
+	[alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
+	[self presentViewController:alert animated:YES completion:nil];
 }
 
 - (NSString*)keyForApp:(ASDPurchaseHistoryApp*)app
@@ -707,7 +779,7 @@ static NSString* const WFSPurchasedCellIdentifier = @"WFSPurchasedCellIdentifier
 	}
 	if (localOnly)
 	{
-		return @"Not in Purchases — found on this device";
+		return @"Bought on this device (hidden from Purchases)";
 	}
 	return @"Not Installed";
 }
@@ -931,7 +1003,7 @@ static NSString* const WFSPurchasedCellIdentifier = @"WFSPurchasedCellIdentifier
 	NSString* title = app.title.length ? app.title : app.bundleID;
 	if (app.storeItemID <= 0)
 	{
-		UIAlertController* infoAlert = [UIAlertController alertControllerWithTitle:title message:@"This app was removed from the App Store and its App ID is not recorded on this device. To download it, use the Download tab with its App Store link, or enter the App ID manually." preferredStyle:UIAlertControllerStyleAlert];
+		UIAlertController* infoAlert = [UIAlertController alertControllerWithTitle:title message:@"This app was removed from the App Store and its App ID is not recorded on this device. Tap + to add it by App ID, Bundle ID, or App Store link." preferredStyle:UIAlertControllerStyleAlert];
 		[infoAlert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
 		[self presentViewController:infoAlert animated:YES completion:nil];
 		return;
