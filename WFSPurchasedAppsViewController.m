@@ -118,6 +118,30 @@ static NSString* const WFSPurchasedCellIdentifier = @"WFSPurchasedCellIdentifier
 	self.tableView.tableHeaderView = header;
 }
 
+- (void)viewDidLayoutSubviews
+{
+	[super viewDidLayoutSubviews];
+	UIView* header = self.tableView.tableHeaderView;
+	if (!header)
+	{
+		return;
+	}
+	CGFloat width = self.tableView.bounds.size.width;
+	if (width <= 0)
+	{
+		width = [UIScreen mainScreen].bounds.size.width;
+	}
+	if (fabs(header.bounds.size.width - width) > 0.5)
+	{
+		header.frame = CGRectMake(0, 0, width, header.bounds.size.height);
+	}
+	self.accountLabel.frame = CGRectMake(16, 10, width - 32, 20);
+	self.filterControl.frame = CGRectMake(16, 36, width - 32, 32);
+	UIView* statusView = self.statusLabel.superview;
+	statusView.frame = CGRectMake(16, 74, width - 32, 26);
+	self.statusLabel.frame = CGRectMake(28, 2, statusView.bounds.size.width - 28, 22);
+}
+
 - (void)setLoading:(BOOL)loading
 {
 	_loading = loading;
@@ -542,11 +566,27 @@ static NSString* const WFSPurchasedCellIdentifier = @"WFSPurchasedCellIdentifier
 
 - (void)loadIconForApp:(ASDPurchaseHistoryApp*)app intoCell:(UITableViewCell*)cell atRow:(NSInteger)row
 {
-	NSString* urlString = app.iconURLString.length ? app.iconURLString : app.circularIconURLString;
+	NSString* urlString = nil;
+	NSDictionary* metadata = self.storeInfo[@(app.storeItemID)];
+	if ([metadata[@"artworkUrl512"] isKindOfClass:[NSString class]] && ((NSString*)metadata[@"artworkUrl512"]).length)
+	{
+		urlString = metadata[@"artworkUrl512"];
+	}
+	else if (app.iconURLString.length)
+	{
+		urlString = app.iconURLString;
+	}
+	else if (app.circularIconURLString.length)
+	{
+		urlString = app.circularIconURLString;
+	}
 	UIImage* placeholder = [UIImage systemImageNamed:@"app"];
 	cell.imageView.image = placeholder;
-	cell.imageView.layer.cornerRadius = 10;
+	cell.imageView.contentMode = UIViewContentModeScaleAspectFit;
+	cell.imageView.layer.cornerRadius = 9;
 	cell.imageView.layer.masksToBounds = YES;
+	cell.imageView.layer.borderWidth = 0.5;
+	cell.imageView.layer.borderColor = [UIColor separatorColor].CGColor;
 	if (urlString.length == 0)
 	{
 		return;

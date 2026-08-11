@@ -1,6 +1,5 @@
 #import "WFSRootViewController.h"
 #import "WFSVersionPickerViewController.h"
-#import "WFSPurchasedAppsViewController.h"
 #import "CoreServices.h"
 #import <SystemConfiguration/SystemConfiguration.h>
 
@@ -56,16 +55,6 @@
 		NSString* aboutText = [self getAboutText];
 		[downloadGroupSpecifier setProperty:aboutText forKey:@"footerText"];
 
-		PSSpecifier* appleIdGroupSpecifier = [PSSpecifier emptyGroupSpecifier];
-		appleIdGroupSpecifier.name = @"Apple ID";
-		[_specifiers addObject:appleIdGroupSpecifier];
-
-		PSSpecifier* purchasesSpecifier = [PSSpecifier preferenceSpecifierNamed:@"Purchased Apps" target:self set:nil get:nil detail:nil cell:PSButtonCell edit:nil];
-		purchasesSpecifier.identifier = @"purchases";
-		[purchasesSpecifier setProperty:@YES forKey:@"enabled"];
-		purchasesSpecifier.buttonAction = @selector(showPurchasedApps);
-		[_specifiers addObject:purchasesSpecifier];
-
 		PSSpecifier* installedGroupSpecifier = [PSSpecifier emptyGroupSpecifier];
 		installedGroupSpecifier.name = @"Installed Apps";
 		[_specifiers addObject:installedGroupSpecifier];
@@ -108,29 +97,10 @@
 	return reachable;
 }
 
-- (void)showPurchasedApps
+- (void)wfsPresentViewController:(UIViewController*)viewController
 {
-	@try
-	{
-		WFSPurchasedAppsViewController* purchasesViewController = [[WFSPurchasedAppsViewController alloc] initWithSelectionHandler:^(long long appId, NSDictionary* metadataPlist)
-		{
-			[self getAllAppVersionIdsAndPrompt:appId metadataPlist:metadataPlist];
-		}];
-		if (self.navigationController)
-		{
-			[self.navigationController pushViewController:purchasesViewController animated:YES];
-		}
-		else
-		{
-			UINavigationController* nav = [[UINavigationController alloc] initWithRootViewController:purchasesViewController];
-			[self presentViewController:nav animated:YES completion:nil];
-		}
-	}
-	@catch (NSException* exception)
-	{
-		NSLog(@"[WaffleStore] Purchases: showPurchasedApps exception %@ %@", exception.name, exception.reason);
-		[self showAlert:@"Error" message:[NSString stringWithFormat:@"Could not open purchases (%@).", exception.reason ?: exception.name]];
-	}
+	UIViewController* presenter = self.wfsPresentingViewController ?: self;
+	[presenter presentViewController:viewController animated:YES completion:nil];
 }
 
 - (void)downloadAppShortcut:(PSSpecifier*)specifier
@@ -318,13 +288,13 @@
 				}
 			}
 		}
-		[self presentViewController:nav animated:YES completion:nil];
+		[self wfsPresentViewController:nav];
 	});
 }
 
 - (NSString*)getAboutText
 {
-	return @"WaffleStore v1.4\nMade by Mineek\nApp Icon designed by Kate\nhttps://github.com/mineek/MuffinStore";
+	return @"WaffleStore v1.0.0\nMade by muz011, based on MuffinStore by Mineek\nApp Icon designed by Kate\nhttps://github.com/mineek/MuffinStore";
 }
 
 - (void)showAlert:(NSString*)title message:(NSString*)message
@@ -334,7 +304,7 @@
 		UIAlertController* alert = [UIAlertController alertControllerWithTitle:title message:message preferredStyle:UIAlertControllerStyleAlert];
 		UIAlertAction* okAction = [UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil];
 		[alert addAction:okAction];
-		[self presentViewController:alert animated:YES completion:nil];
+		[self wfsPresentViewController:alert];
 	});
 }
 
@@ -356,7 +326,7 @@
 			[indicator.centerXAnchor constraintEqualToAnchor:self.progressAlert.view.centerXAnchor],
 			[indicator.bottomAnchor constraintEqualToAnchor:self.progressAlert.view.bottomAnchor constant:-20]
 		]];
-		[self presentViewController:self.progressAlert animated:YES completion:nil];
+		[self wfsPresentViewController:self.progressAlert];
 	});
 }
 
@@ -437,7 +407,7 @@
 		[versionAlert addAction:downloadAction];
 		UIAlertAction* cancelAction = [UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil];
 		[versionAlert addAction:cancelAction];
-		[self presentViewController:versionAlert animated:YES completion:nil];
+		[self wfsPresentViewController:versionAlert];
 	});
 }
 
@@ -466,7 +436,7 @@
 		[promptAlert addAction:manualAction];
 		UIAlertAction* cancelAction = [UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil];
 		[promptAlert addAction:cancelAction];
-		[self presentViewController:promptAlert animated:YES completion:nil];
+		[self wfsPresentViewController:promptAlert];
 	});
 }
 
@@ -557,7 +527,7 @@
 	[linkAlert addAction:downloadAction];
 	UIAlertAction* cancelAction = [UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil];
 	[linkAlert addAction:cancelAction];
-	[self presentViewController:linkAlert animated:YES completion:nil];
+	[self wfsPresentViewController:linkAlert];
 }
 
 @end

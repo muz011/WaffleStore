@@ -4,4 +4,6 @@
 
 @interface WFSRootViewController : PSListController
 
+@property (nonatomic, weak) UIViewController* wfsPresentingViewController;
+
 @end
