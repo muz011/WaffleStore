@@ -16,12 +16,14 @@ typedef NS_ENUM(NSInteger, WFSAppleIDDownloaderErrorCode)
 	WFSAppleIDDownloaderErrorInvalidResponse,
 	WFSAppleIDDownloaderErrorNetwork,
 	WFSAppleIDDownloaderErrorRateLimited,
+	WFSAppleIDDownloaderErrorCancelled,
 };
 
 typedef void (^WFSAppleIDAuthCompletion)(NSError* _Nullable error);
 typedef void (^WFSAppleIDVersionsCompletion)(NSArray* _Nullable versions, NSDictionary* _Nullable metadata, NSError* _Nullable error);
 typedef void (^WFSAppleIDDownloadInfoCompletion)(NSURL* _Nullable ipaURL, NSDictionary* _Nullable metadata, NSError* _Nullable error);
 typedef void (^WFSAppleIDPurchaseSearchCompletion)(NSDictionary* _Nullable purchase, NSError* _Nullable error);
+typedef void (^WFSAppleIDAuthProgressHandler)(NSUInteger attempt, NSUInteger totalAttempts);
 
 @interface WFSAppleIDDownloader : NSObject
 
@@ -29,9 +31,11 @@ typedef void (^WFSAppleIDPurchaseSearchCompletion)(NSDictionary* _Nullable purch
 
 @property (nonatomic, readonly, getter=isAuthenticated) BOOL authenticated;
 @property (nonatomic, copy, readonly, nullable) NSString* authenticatedAppleId;
+@property (nonatomic, copy, nullable) WFSAppleIDAuthProgressHandler authProgressHandler;
 
 - (void)authenticateWithAppleId:(NSString*)appleId password:(NSString*)password completion:(WFSAppleIDAuthCompletion)completion;
 - (void)retryWithTwoFactorCode:(NSString*)code completion:(WFSAppleIDAuthCompletion)completion;
+- (void)cancelAuthentication;
 - (void)resetSession;
 
 - (void)getVersionsForAppId:(long long)appId completion:(WFSAppleIDVersionsCompletion)completion;

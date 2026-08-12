@@ -11,7 +11,7 @@ static NSString* const kWFSBuyHost = @"buy.itunes.apple.com";
 static NSString* const kWFSRedownloadEndpoint = @"https://downloaddispatch.itunes.apple.com/r/redownload";
 
 static const NSInteger kWFSMaxRedirects = 5;
-static const NSInteger kWFSMaxAuthAttempts = 24;
+static const NSInteger kWFSMaxAuthAttempts = 100;
 
 @interface WFSAppleIDBlockingRedirectDelegate : NSObject <NSURLSessionTaskDelegate>
 @end
@@ -36,6 +36,7 @@ static const NSInteger kWFSMaxAuthAttempts = 24;
 @property (nonatomic, copy) NSString* storeFront;
 @property (nonatomic, copy) NSString* pod;
 @property (nonatomic, assign) BOOL authenticated;
+@property (nonatomic, assign) BOOL cancelRequested;
 @property (nonatomic, copy, readwrite) NSString* authenticatedAppleId;
 @end
 
@@ -76,6 +77,7 @@ static const NSInteger kWFSMaxAuthAttempts = 24;
 		return;
 	}
 	[self resetSessionState];
+	self.cancelRequested = NO;
 	self.appleId = appleId;
 	self.password = password;
 	self.authenticatedAppleId = appleId;
@@ -95,6 +97,11 @@ static const NSInteger kWFSMaxAuthAttempts = 24;
 	}
 	self.password = [NSString stringWithFormat:@"%@%@", self.password, code ?: @""];
 	[self tryAuthenticateWithAttempt:2 completion:completion];
+}
+
+- (void)cancelAuthentication
+{
+	self.cancelRequested = YES;
 }
 
 - (void)resetSession
@@ -374,6 +381,20 @@ static const NSInteger kWFSMaxAuthAttempts = 24;
 
 - (void)tryAuthEndpointCandidates:(NSArray*)candidates index:(NSUInteger)index attempt:(NSInteger)attempt retryCount:(NSInteger)retryCount diagnostics:(NSMutableArray*)diagnostics completion:(WFSAppleIDAuthCompletion)completion
 {
+	if (self.cancelRequested)
+	{
+		[self finishAuth:completion error:[self errorWithCode:WFSAppleIDDownloaderErrorCancelled message:@"Sign-in was cancelled."]];
+		return;
+	}
+	if (self.authProgressHandler)
+	{
+		NSInteger total = MAX(kWFSMaxAuthAttempts, 1);
+		NSInteger reportedAttempt = MIN(retryCount + 1, total);
+		dispatch_async(dispatch_get_main_queue(), ^
+		{
+			self.authProgressHandler((NSUInteger)reportedAttempt, (NSUInteger)total);
+		});
+	}
 	if (retryCount >= kWFSMaxAuthAttempts)
 	{
 		[self finishAuth:completion error:[self authExhaustedErrorWithDiagnostics:diagnostics]];
@@ -390,7 +411,7 @@ static const NSInteger kWFSMaxAuthAttempts = 24;
 	};
 	[self postPlist:body toURL:[NSURL URLWithString:candidate] contentType:@"application/x-www-form-urlencoded" authenticated:NO completion:^(NSData* data, NSHTTPURLResponse* response, NSError* error)
 	{
-		if (error || !data.length)
+		if (error)
 		{
 			NSString* detail = error ? [NSString stringWithFormat:@"transport error: %@", error.localizedDescription] : @"empty response body";
 			[diagnostics addObject:[NSString stringWithFormat:@"POST %@ -> %@ (%@)", candidate, response ? [NSString stringWithFormat:@"HTTP %ld", (long)response.statusCode] : @"no response", detail]];
@@ -451,6 +472,10 @@ static const NSInteger kWFSMaxAuthAttempts = 24;
 
 - (NSError*)processAuthResponseData:(NSData*)data httpResponse:(NSHTTPURLResponse*)httpResponse
 {
+	if (httpResponse.statusCode == 204 || (httpResponse.statusCode == 200 && !data.length))
+	{
+		return [self errorWithCode:WFSAppleIDDownloaderError2FARequired message:@"Two-factor authentication code required. Apple sent a verification code to your trusted devices."];
+	}
 	NSDictionary* dict = [self parsePlistResponse:data];
 	if (!dict)
 	{

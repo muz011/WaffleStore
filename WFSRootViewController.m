@@ -27,6 +27,8 @@
 
 @interface WFSRootViewController ()
 @property (nonatomic, strong) UIAlertController* progressAlert;
+@property (nonatomic, strong) UIAlertController* authProgressAlert;
+@property (nonatomic, strong) UIProgressView* authProgressView;
 @end
 
 @implementation WFSRootViewController
@@ -354,6 +356,64 @@
 	});
 }
 
+- (void)showAppleIDAuthProgress
+{
+	dispatch_async(dispatch_get_main_queue(), ^
+	{
+		if (self.authProgressAlert)
+		{
+			return;
+		}
+		UIAlertController* alert = [UIAlertController alertControllerWithTitle:@"Signing in to Apple" message:@"Attempt 0 of 100…" preferredStyle:UIAlertControllerStyleAlert];
+		UIProgressView* progress = [[UIProgressView alloc] initWithProgressViewStyle:UIProgressViewStyleDefault];
+		progress.translatesAutoresizingMaskIntoConstraints = NO;
+		progress.tintColor = [UIColor systemBlueColor];
+		progress.progressTintColor = [UIColor systemBlueColor];
+		progress.trackTintColor = [UIColor systemGray5Color];
+		[alert.view addSubview:progress];
+		[NSLayoutConstraint activateConstraints:@[
+			[progress.centerXAnchor constraintEqualToAnchor:alert.view.centerXAnchor],
+			[progress.bottomAnchor constraintEqualToAnchor:alert.view.bottomAnchor constant:-55],
+			[progress.widthAnchor constraintEqualToAnchor:alert.view.widthAnchor multiplier:0.8]
+		]];
+		[alert addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:^(UIAlertAction* action)
+		{
+			[[WFSAppleIDDownloader sharedDownloader] cancelAuthentication];
+		}]];
+		self.authProgressAlert = alert;
+		self.authProgressView = progress;
+		[self wfsPresentViewController:alert];
+	});
+}
+
+- (void)updateAppleIDAuthProgressAttempt:(NSUInteger)attempt total:(NSUInteger)total
+{
+	dispatch_async(dispatch_get_main_queue(), ^
+	{
+		if (self.authProgressAlert)
+		{
+			self.authProgressAlert.message = [NSString stringWithFormat:@"Attempt %lu of %lu…", (unsigned long)attempt, (unsigned long)total];
+		}
+		if (self.authProgressView)
+		{
+			self.authProgressView.progress = (float)attempt / (float)MAX(total, 1);
+		}
+	});
+}
+
+- (void)dismissAppleIDAuthProgress
+{
+	dispatch_async(dispatch_get_main_queue(), ^
+	{
+		if (self.authProgressAlert)
+		{
+			[self.authProgressAlert dismissViewControllerAnimated:YES completion:nil];
+			self.authProgressAlert = nil;
+			self.authProgressView = nil;
+		}
+	});
+}
+
 - (void)getAllAppVersionIdsFromServer:(long long)appId
 {
 	if (![self isNetworkReachable])
@@ -674,10 +734,16 @@
 
 - (void)authenticateAppleIDWithEmail:(NSString*)email password:(NSString*)password completion:(void (^)(BOOL success))completion
 {
-	[self showDownloadProgressWithMessage:@"Signing in to Apple…"];
-	[[WFSAppleIDDownloader sharedDownloader] authenticateWithAppleId:email password:password completion:^(NSError* error)
+	WFSAppleIDDownloader* downloader = [WFSAppleIDDownloader sharedDownloader];
+	downloader.authProgressHandler = ^(NSUInteger attempt, NSUInteger totalAttempts)
 	{
-		[self dismissDownloadProgress];
+		[self updateAppleIDAuthProgressAttempt:attempt total:totalAttempts];
+	};
+	[self showAppleIDAuthProgress];
+	[downloader authenticateWithAppleId:email password:password completion:^(NSError* error)
+	{
+		[downloader setAuthProgressHandler:nil];
+		[self dismissAppleIDAuthProgress];
 		if (!error)
 		{
 			completion(YES);
@@ -686,6 +752,11 @@
 		if (error.code == WFSAppleIDDownloaderError2FARequired)
 		{
 			[self promptTwoFactorCodeWithCompletion:completion];
+			return;
+		}
+		if (error.code == WFSAppleIDDownloaderErrorCancelled)
+		{
+			completion(NO);
 			return;
 		}
 		[self showAlert:@"Sign In Failed" message:error.localizedDescription];
@@ -711,12 +782,29 @@
 				completion(NO);
 				return;
 			}
-			[self showDownloadProgressWithMessage:@"Verifying code…"];
-			[[WFSAppleIDDownloader sharedDownloader] retryWithTwoFactorCode:code completion:^(NSError* error)
+			WFSAppleIDDownloader* downloader = [WFSAppleIDDownloader sharedDownloader];
+			downloader.authProgressHandler = ^(NSUInteger attempt, NSUInteger totalAttempts)
 			{
-				[self dismissDownloadProgress];
+				[self updateAppleIDAuthProgressAttempt:attempt total:totalAttempts];
+			};
+			[self showAppleIDAuthProgress];
+			[downloader retryWithTwoFactorCode:code completion:^(NSError* error)
+			{
+				[downloader setAuthProgressHandler:nil];
+				[self dismissAppleIDAuthProgress];
 				if (error)
 				{
+					if (error.code == WFSAppleIDDownloaderError2FARequired)
+					{
+						[self showAlert:@"Sign In Failed" message:@"The verification code was rejected or expired. Please try signing in again."];
+						completion(NO);
+						return;
+					}
+					if (error.code == WFSAppleIDDownloaderErrorCancelled)
+					{
+						completion(NO);
+						return;
+					}
 					[self showAlert:@"Sign In Failed" message:error.localizedDescription];
 					completion(NO);
 					return;
@@ -725,7 +813,11 @@
 			}];
 		}];
 		[codeAlert addAction:verifyAction];
-		UIAlertAction* cancelAction = [UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil];
+		UIAlertAction* cancelAction = [UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:^(UIAlertAction* action)
+		{
+			[[WFSAppleIDDownloader sharedDownloader] cancelAuthentication];
+			completion(NO);
+		}];
 		[codeAlert addAction:cancelAction];
 		[self wfsPresentViewController:codeAlert];
 	});
