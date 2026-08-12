@@ -9,6 +9,7 @@ typedef NS_ENUM(NSInteger, WFSAppleIDDownloaderErrorCode)
 	WFSAppleIDDownloaderError2FARequired = 1,
 	WFSAppleIDDownloaderErrorAuthenticationFailed,
 	WFSAppleIDDownloaderErrorBrowserSignInRequired,
+	WFSAppleIDDownloaderErrorPasswordTokenExpired,
 	WFSAppleIDDownloaderErrorNotAuthenticated,
 	WFSAppleIDDownloaderErrorLicenseNotFound,
 	WFSAppleIDDownloaderErrorPurchaseFailed,

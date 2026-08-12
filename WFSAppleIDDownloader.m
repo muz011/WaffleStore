@@ -8,7 +8,20 @@ static NSString* const kWFSFastAuthEndpoint = @"https://auth.itunes.apple.com/au
 static NSString* const kWFSLegacyAuthEndpoint = @"https://buy.itunes.apple.com/WebObjects/MZFinance.woa/wa/authenticate";
 static NSString* const kWFSInitBagEndpoint = @"https://init.itunes.apple.com/bag.xml?guid=%@";
 static NSString* const kWFSBuyHost = @"buy.itunes.apple.com";
-static NSString* const kWFSRedownloadEndpoint = @"https://downloaddispatch.itunes.apple.com/r/redownload";
+
+static NSString* const kWFSFailureTypeInvalidCredentials = @"-5000";
+static NSString* const kWFSFailureTypePasswordTokenExpired = @"2034";
+static NSString* const kWFSFailureTypeSignInRequired = @"2042";
+static NSString* const kWFSFailureTypeLicenseNotFound = @"9610";
+static NSString* const kWFSFailureTypeTemporarilyUnavailable = @"2059";
+static NSString* const kWFSFailureTypeLicenseAlreadyExists = @"5002";
+static NSString* const kWFSFailureTypeDeviceVerificationFailed = @"1008";
+static NSString* const kWFSBadLoginMessage = @"MZFinance.BadLogin.Configurator_message";
+static NSString* const kWFSAccountDisabledMessage = @"Your account is disabled.";
+static NSString* const kWFSSubscriptionRequiredMessage = @"Subscription Required";
+static NSString* const kWFSPasswordChangedMessage = @"Your password has changed.";
+static NSString* const kWFSPricingParameterAppStore = @"STDQ";
+static NSString* const kWFSPricingParameterAppleArcade = @"GAME";
 
 static const NSInteger kWFSMaxRedirects = 5;
 static const NSInteger kWFSMaxAuthAttempts = 100;
@@ -37,6 +50,7 @@ static const NSInteger kWFSMaxAuthAttempts = 100;
 @property (nonatomic, copy) NSString* pod;
 @property (nonatomic, assign) BOOL authenticated;
 @property (nonatomic, assign) BOOL cancelRequested;
+@property (nonatomic, assign) BOOL twoFactorCodeSent;
 @property (nonatomic, copy, readwrite) NSString* authenticatedAppleId;
 @end
 
@@ -95,8 +109,9 @@ static const NSInteger kWFSMaxAuthAttempts = 100;
 		[self finishAuth:completion error:[self errorWithCode:WFSAppleIDDownloaderErrorAuthenticationFailed message:@"No sign-in in progress."]];
 		return;
 	}
-	self.password = [NSString stringWithFormat:@"%@%@", self.password, code ?: @""];
-	[self tryAuthenticateWithAttempt:2 completion:completion];
+	self.password = [NSString stringWithFormat:@"%@%@", self.password, [[code ?: @""] stringByReplacingOccurrencesOfString:@" " withString:@""]];
+	self.twoFactorCodeSent = YES;
+	[self tryAuthenticateWithAttempt:1 completion:completion];
 }
 
 - (void)cancelAuthentication
@@ -374,9 +389,26 @@ static const NSInteger kWFSMaxAuthAttempts = 100;
 					endpoint = [self stringForKey:@"authenticateAccount" in:urlBag];
 				}
 			}
+			if (endpoint.length)
+			{
+				endpoint = [self authenticateURLString:endpoint];
+			}
 		}
 		completion(endpoint);
 	}] resume];
+}
+
+- (NSString*)authenticateURLString:(NSString*)endpoint
+{
+	if (!endpoint.length)
+	{
+		return endpoint;
+	}
+	if ([endpoint containsString:@"/native/"] && ![endpoint hasSuffix:@"/"])
+	{
+		return [endpoint stringByAppendingString:@"/"];
+	}
+	return endpoint;
 }
 
 - (void)tryAuthEndpointCandidates:(NSArray*)candidates index:(NSUInteger)index attempt:(NSInteger)attempt retryCount:(NSInteger)retryCount diagnostics:(NSMutableArray*)diagnostics completion:(WFSAppleIDAuthCompletion)completion
@@ -409,17 +441,32 @@ static const NSInteger kWFSMaxAuthAttempts = 100;
 		@"rmp": @"0",
 		@"why": @"signIn",
 	};
-	[self postPlist:body toURL:[NSURL URLWithString:candidate] contentType:@"application/x-www-form-urlencoded" authenticated:NO completion:^(NSData* data, NSHTTPURLResponse* response, NSError* error)
+	[self postAuthBody:body toURLString:candidate attempt:attempt retryCount:retryCount redirects:0 candidates:candidates index:index diagnostics:diagnostics completion:completion];
+}
+
+- (void)postAuthBody:(NSDictionary*)body toURLString:(NSString*)urlString attempt:(NSInteger)attempt retryCount:(NSInteger)retryCount redirects:(NSInteger)redirects candidates:(NSArray*)candidates index:(NSUInteger)index diagnostics:(NSMutableArray*)diagnostics completion:(WFSAppleIDAuthCompletion)completion
+{
+	[self postPlist:body toURL:[NSURL URLWithString:urlString] contentType:@"application/x-www-form-urlencoded" authenticated:NO completion:^(NSData* data, NSHTTPURLResponse* response, NSError* error)
 	{
 		if (error)
 		{
 			NSString* detail = error ? [NSString stringWithFormat:@"transport error: %@", error.localizedDescription] : @"empty response body";
-			[diagnostics addObject:[NSString stringWithFormat:@"POST %@ -> %@ (%@)", candidate, response ? [NSString stringWithFormat:@"HTTP %ld", (long)response.statusCode] : @"no response", detail]];
+			[diagnostics addObject:[NSString stringWithFormat:@"POST %@ -> %@ (%@)", urlString, response ? [NSString stringWithFormat:@"HTTP %ld", (long)response.statusCode] : @"no response", detail]];
 			[self retryAuthWithCandidates:candidates index:index + 1 attempt:attempt retryCount:retryCount diagnostics:diagnostics completion:completion];
 			return;
 		}
-		[diagnostics addObject:[NSString stringWithFormat:@"POST %@ -> HTTP %ld (%lu bytes)", candidate, (long)response.statusCode, (unsigned long)data.length]];
-		NSError* processError = [self processAuthResponseData:data httpResponse:response];
+		[diagnostics addObject:[NSString stringWithFormat:@"POST %@ -> HTTP %ld (%lu bytes)", urlString, (long)response.statusCode, (unsigned long)data.length]];
+		if (response.statusCode >= 300 && response.statusCode < 400)
+		{
+			NSString* location = response.allHeaderFields[@"Location"];
+			if (location.length && redirects < kWFSMaxRedirects)
+			{
+				[diagnostics addObject:[NSString stringWithFormat:@"  following HTTP %ld redirect to %@", (long)response.statusCode, location]];
+				[self postAuthBody:body toURLString:location attempt:attempt retryCount:retryCount redirects:redirects + 1 candidates:candidates index:index diagnostics:diagnostics completion:completion];
+				return;
+			}
+		}
+		NSError* processError = [self processAuthResponseData:data httpResponse:response attempt:attempt];
 		if (!processError)
 		{
 			[self finishAuth:completion error:nil];
@@ -470,11 +517,12 @@ static const NSInteger kWFSMaxAuthAttempts = 100;
 	return [self errorWithCode:WFSAppleIDDownloaderErrorNetwork message:message];
 }
 
-- (NSError*)processAuthResponseData:(NSData*)data httpResponse:(NSHTTPURLResponse*)httpResponse
+- (NSError*)processAuthResponseData:(NSData*)data httpResponse:(NSHTTPURLResponse*)httpResponse attempt:(NSInteger)attempt
 {
-	if (httpResponse.statusCode == 204 || (httpResponse.statusCode == 200 && !data.length))
+	NSInteger statusCode = httpResponse.statusCode;
+	if (statusCode == 204 || statusCode == 403 || statusCode == 404 || statusCode == 503 || (statusCode == 200 && !data.length))
 	{
-		return [self errorWithCode:WFSAppleIDDownloaderError2FARequired message:@"Two-factor authentication code required. Apple sent a verification code to your trusted devices."];
+		return [self errorWithCode:WFSAppleIDDownloaderErrorInvalidResponse message:@"Apple's sign-in endpoint returned an empty response."];
 	}
 	NSDictionary* dict = [self parsePlistResponse:data];
 	if (!dict)
@@ -483,13 +531,34 @@ static const NSInteger kWFSMaxAuthAttempts = 100;
 	}
 	NSString* failureType = [self stringForKey:@"failureType" in:dict];
 	NSString* customerMessage = [self stringForKey:@"customerMessage" in:dict];
-	if ([failureType isEqualToString:@"-5000"])
+	if (attempt == 1 && [failureType isEqualToString:kWFSFailureTypeInvalidCredentials])
 	{
-		return [self errorWithCode:WFSAppleIDDownloaderError2FARequired message:@"Two-factor authentication code required."];
+		return [self errorWithCode:WFSAppleIDDownloaderErrorInvalidResponse message:@"Apple reported a transient sign-in error; retrying."];
+	}
+	if (failureType.length == 0 && !self.twoFactorCodeSent && [customerMessage isEqualToString:kWFSBadLoginMessage])
+	{
+		return [self errorWithCode:WFSAppleIDDownloaderError2FARequired message:@"Two-factor authentication code required. Apple sent a verification code to your trusted devices."];
+	}
+	if (self.twoFactorCodeSent && [customerMessage isEqualToString:kWFSBadLoginMessage])
+	{
+		return [self errorWithCode:WFSAppleIDDownloaderError2FARequired message:@"The verification code was rejected."];
+	}
+	if ([customerMessage isEqualToString:kWFSAccountDisabledMessage])
+	{
+		return [self errorWithCode:WFSAppleIDDownloaderErrorAuthenticationFailed message:kWFSAccountDisabledMessage];
 	}
 	if (customerMessage && [customerMessage containsString:@"AMD-Action::SP"])
 	{
 		return [self errorWithCode:WFSAppleIDDownloaderErrorBrowserSignInRequired message:@"This Apple ID requires sign-in approval from a browser. Try signing in on a computer first, then try again."];
+	}
+	if (failureType.length)
+	{
+		NSString* message = customerMessage.length ? customerMessage : @"Apple authentication failed.";
+		return [self errorWithCode:WFSAppleIDDownloaderErrorAuthenticationFailed message:message];
+	}
+	if (statusCode != 200)
+	{
+		return [self errorWithCode:WFSAppleIDDownloaderErrorAuthenticationFailed message:@"Apple returned an unexpected status for sign-in."];
 	}
 	NSString* passwordToken = [self stringForKey:@"passwordToken" in:dict];
 	NSString* dsid = nil;
@@ -551,14 +620,12 @@ static const NSInteger kWFSMaxAuthAttempts = 100;
 	body[@"creditDisplay"] = @"";
 	body[@"guid"] = self.guid;
 	body[@"salableAdamId"] = [NSString stringWithFormat:@"%lld", appId];
-	body[@"serialNumber"] = @"0";
 	if (versionId > 0)
 	{
-		body[@"appExtVrsId"] = [NSString stringWithFormat:@"%lld", versionId];
-		body[@"extVrsId"] = [NSString stringWithFormat:@"%lld", versionId];
+		body[@"externalVersionId"] = [NSString stringWithFormat:@"%lld", versionId];
 	}
 	NSString* urlString = [NSString stringWithFormat:@"https://%@/WebObjects/MZFinance.woa/wa/volumeStoreDownloadProduct?guid=%@", [self buyHost], self.guid];
-	[self postPlist:body toURL:[NSURL URLWithString:urlString] contentType:@"application/x-apple-plist" authenticated:YES completion:^(NSData* data, NSHTTPURLResponse* response, NSError* error)
+	[self postPlist:body toURL:[NSURL URLWithString:urlString] contentType:@"application/x-apple-plist" authenticated:YES tokenHeaders:NO completion:^(NSData* data, NSHTTPURLResponse* response, NSError* error)
 	{
 		if (error)
 		{
@@ -578,16 +645,25 @@ static const NSInteger kWFSMaxAuthAttempts = 100;
 			completion(nil, nil, [self errorWithCode:WFSAppleIDDownloaderErrorInvalidResponse message:@"Apple returned an invalid response."]);
 			return;
 		}
-		NSError* failureError = [self failureErrorFromResponse:dict];
-		if (failureError)
+		NSString* failureType = [self stringForKey:@"failureType" in:dict];
+		NSString* customerMessage = [self stringForKey:@"customerMessage" in:dict];
+		if ([failureType isEqualToString:kWFSFailureTypePasswordTokenExpired] ||
+			[failureType isEqualToString:kWFSFailureTypeSignInRequired] ||
+			[failureType isEqualToString:kWFSFailureTypeDeviceVerificationFailed] ||
+			[failureType isEqualToString:kWFSFailureTypeLicenseAlreadyExists])
 		{
-			NSString* failureType = [self stringForKey:@"failureType" in:dict];
-			if ([failureType isEqualToString:@"5002"])
-			{
-				[self writeDebugLog:@"failureType 5002 detected, falling back to redownload endpoint"];
-				[self redownloadForAppId:appId versionId:versionId completion:completion];
-				return;
-			}
+			[self writeDebugLog:@"volumeStoreDownloadProduct: session expired (token expired / sign-in required)"];
+			completion(nil, dict, [self errorWithCode:WFSAppleIDDownloaderErrorPasswordTokenExpired message:@"Your Apple ID session has expired. Sign in again."]);
+			return;
+		}
+		if ([failureType isEqualToString:kWFSFailureTypeLicenseNotFound])
+		{
+			completion(nil, dict, [self errorWithCode:WFSAppleIDDownloaderErrorLicenseNotFound message:customerMessage.length ? customerMessage : @"This Apple ID has not purchased this app."]);
+			return;
+		}
+		if (failureType.length || customerMessage.length)
+		{
+			NSError* failureError = [self failureErrorFromResponse:dict];
 			completion(nil, dict, failureError);
 			return;
 		}
@@ -606,60 +682,12 @@ static const NSInteger kWFSMaxAuthAttempts = 100;
 	}];
 }
 
-- (void)redownloadForAppId:(long long)appId versionId:(long long)versionId completion:(void (^)(NSDictionary* song, NSDictionary* response, NSError* error))completion
+- (void)buyProductForAppId:(long long)appId completion:(void (^)(NSError* error))completion
 {
-	NSMutableURLRequest* request = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:[NSString stringWithFormat:@"%@?appExtVrsId=%lld&guid=%@", kWFSRedownloadEndpoint, versionId, self.guid]]];
-	[request setValue:kWFSConfiguratorUA forHTTPHeaderField:@"User-Agent"];
-	if (self.dsid.length)
-	{
-		[request setValue:self.dsid forHTTPHeaderField:@"X-Dsid"];
-		[request setValue:self.dsid forHTTPHeaderField:@"iCloud-Dsid"];
-	}
-	if (self.token.length)
-	{
-		[request setValue:self.token forHTTPHeaderField:@"X-Token"];
-	}
-	if (self.storeFront.length)
-	{
-		[request setValue:self.storeFront forHTTPHeaderField:@"X-Apple-Store-Front"];
-	}
-	[[self.session dataTaskWithRequest:request completionHandler:^(NSData* data, NSURLResponse* response, NSError* error)
-	{
-		if (error)
-		{
-			completion(nil, nil, [self networkError:error]);
-			return;
-		}
-		[self writeDebugLog:[NSString stringWithFormat:@"redownload(appId=%lld, versionId=%lld) -> HTTP %ld (%lu bytes)", appId, versionId, (long)((NSHTTPURLResponse*)response).statusCode, (unsigned long)data.length]];
-		[self writeRawResponseData:data label:@"redownload"];
-		NSDictionary* dict = [self parsePlistResponse:data];
-		if (!dict)
-		{
-			completion(nil, nil, [self errorWithCode:WFSAppleIDDownloaderErrorInvalidResponse message:@"Apple returned an invalid response."]);
-			return;
-		}
-		NSError* failureError = [self failureErrorFromResponse:dict];
-		if (failureError)
-		{
-			completion(nil, dict, failureError);
-			return;
-		}
-		NSArray* songList = dict[@"songList"];
-		NSDictionary* song = nil;
-		if ([songList isKindOfClass:[NSArray class]] && songList.count > 0)
-		{
-			song = songList[0];
-		}
-		if (![song isKindOfClass:[NSDictionary class]])
-		{
-			completion(nil, dict, [self errorWithCode:WFSAppleIDDownloaderErrorNoSong message:@"Apple did not return download information for this app."]);
-			return;
-		}
-		completion(song, dict, nil);
-	}] resume];
+	[self buyProductForAppId:appId pricingParameters:kWFSPricingParameterAppStore completion:completion];
 }
 
-- (void)buyProductForAppId:(long long)appId completion:(void (^)(NSError* error))completion
+- (void)buyProductForAppId:(long long)appId pricingParameters:(NSString*)pricingParameters completion:(void (^)(NSError* error))completion
 {
 	NSDictionary* body = @{
 		@"guid": self.guid,
@@ -667,14 +695,16 @@ static const NSInteger kWFSMaxAuthAttempts = 100;
 		@"appExtVrsId": @"0",
 		@"price": @"0",
 		@"productType": @"C",
-		@"pricingParameters": @"STDQ",
+		@"pricingParameters": pricingParameters,
 		@"hasAskedToFulfillPreorder": @"true",
 		@"buyWithoutAuthorization": @"true",
 		@"hasDoneAgeCheck": @"true",
-		@"hasConfirmedPaymentSheet": @"true",
+		@"needDiv": @"0",
+		@"origPage": [NSString stringWithFormat:@"Software-%lld", appId],
+		@"origPageLocation": @"Buy",
 	};
 	NSString* urlString = [NSString stringWithFormat:@"https://%@/WebObjects/MZFinance.woa/wa/buyProduct", [self buyHost]];
-	[self postPlist:body toURL:[NSURL URLWithString:urlString] contentType:@"application/x-apple-plist" authenticated:YES completion:^(NSData* data, NSHTTPURLResponse* response, NSError* error)
+	[self postPlist:body toURL:[NSURL URLWithString:urlString] contentType:@"application/x-apple-plist" authenticated:YES tokenHeaders:YES completion:^(NSData* data, NSHTTPURLResponse* response, NSError* error)
 	{
 		if (error)
 		{
@@ -692,19 +722,45 @@ static const NSInteger kWFSMaxAuthAttempts = 100;
 			completion([self errorWithCode:WFSAppleIDDownloaderErrorInvalidResponse message:@"Apple returned an invalid response."]);
 			return;
 		}
-		NSError* failureError = [self failureErrorFromResponse:dict];
-		if (failureError)
+		NSString* failureType = [self stringForKey:@"failureType" in:dict];
+		NSString* customerMessage = [self stringForKey:@"customerMessage" in:dict];
+		if ([failureType isEqualToString:kWFSFailureTypeTemporarilyUnavailable])
 		{
-			completion(failureError);
+			[self writeDebugLog:@"buyProduct: temporarily unavailable, retrying with GAME pricing parameter"];
+			[self buyProductForAppId:appId pricingParameters:kWFSPricingParameterAppleArcade completion:completion];
 			return;
 		}
-		NSString* docType = [self stringForKey:@"jingleDocType" in:dict];
-		if ([docType isEqualToString:@"purchaseSuccess"])
+		if ([customerMessage isEqualToString:kWFSSubscriptionRequiredMessage])
+		{
+			completion([self errorWithCode:WFSAppleIDDownloaderErrorPurchaseFailed message:kWFSSubscriptionRequiredMessage]);
+			return;
+		}
+		if ([failureType isEqualToString:kWFSFailureTypePasswordTokenExpired] ||
+			[failureType isEqualToString:kWFSFailureTypeSignInRequired] ||
+			[failureType isEqualToString:kWFSFailureTypeDeviceVerificationFailed] ||
+			[customerMessage isEqualToString:kWFSPasswordChangedMessage])
+		{
+			completion([self errorWithCode:WFSAppleIDDownloaderErrorPasswordTokenExpired message:@"Your Apple ID session has expired. Sign in again."]);
+			return;
+		}
+		if ([failureType isEqualToString:kWFSFailureTypeLicenseAlreadyExists])
 		{
 			completion(nil);
 			return;
 		}
-		completion([self errorWithCode:WFSAppleIDDownloaderErrorPurchaseFailed message:[self stringForKey:@"customerMessage" in:dict] ?: @"The app could not be purchased."]);
+		if (failureType.length || customerMessage.length)
+		{
+			completion([self errorWithCode:WFSAppleIDDownloaderErrorPurchaseFailed message:customerMessage.length ? customerMessage : @"The app could not be purchased."]);
+			return;
+		}
+		NSString* docType = [self stringForKey:@"jingleDocType" in:dict];
+		NSString* status = [self stringForKey:@"status" in:dict];
+		if (![docType isEqualToString:@"purchaseSuccess"] || (status.length && ![status isEqualToString:@"0"]))
+		{
+			completion([self errorWithCode:WFSAppleIDDownloaderErrorPurchaseFailed message:customerMessage.length ? customerMessage : @"The app could not be purchased."]);
+			return;
+		}
+		completion(nil);
 	}];
 }
 
@@ -751,6 +807,11 @@ static const NSInteger kWFSMaxAuthAttempts = 100;
 
 - (void)postPlist:(NSDictionary*)body toURL:(NSURL*)url contentType:(NSString*)contentType authenticated:(BOOL)authenticated completion:(void (^)(NSData* data, NSHTTPURLResponse* response, NSError* error))completion
 {
+	[self postPlist:body toURL:url contentType:contentType authenticated:authenticated tokenHeaders:authenticated completion:completion];
+}
+
+- (void)postPlist:(NSDictionary*)body toURL:(NSURL*)url contentType:(NSString*)contentType authenticated:(BOOL)authenticated tokenHeaders:(BOOL)tokenHeaders completion:(void (^)(NSData* data, NSHTTPURLResponse* response, NSError* error))completion
+{
 	NSError* serializationError = nil;
 	NSData* bodyData = [NSPropertyListSerialization dataWithPropertyList:body format:NSPropertyListXMLFormat_v1_0 options:0 error:&serializationError];
 	if (!bodyData)
@@ -773,13 +834,16 @@ static const NSInteger kWFSMaxAuthAttempts = 100;
 			[request setValue:self.dsid forHTTPHeaderField:@"X-Dsid"];
 			[request setValue:self.dsid forHTTPHeaderField:@"iCloud-Dsid"];
 		}
-		if (self.token.length)
+		if (tokenHeaders)
 		{
-			[request setValue:self.token forHTTPHeaderField:@"X-Token"];
-		}
-		if (self.storeFront.length)
-		{
-			[request setValue:self.storeFront forHTTPHeaderField:@"X-Apple-Store-Front"];
+			if (self.token.length)
+			{
+				[request setValue:self.token forHTTPHeaderField:@"X-Token"];
+			}
+			if (self.storeFront.length)
+			{
+				[request setValue:self.storeFront forHTTPHeaderField:@"X-Apple-Store-Front"];
+			}
 		}
 	}
 	request.HTTPBody = bodyData;
@@ -978,6 +1042,7 @@ static const NSInteger kWFSMaxAuthAttempts = 100;
 	self.token = nil;
 	self.storeFront = nil;
 	self.pod = nil;
+	self.twoFactorCodeSent = NO;
 }
 
 - (void)finishVersions:(WFSAppleIDVersionsCompletion)completion versions:(NSArray*)versions metadata:(NSDictionary*)metadata error:(NSError*)error

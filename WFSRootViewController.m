@@ -794,14 +794,20 @@
 				[self dismissAppleIDAuthProgress];
 				if (error)
 				{
-					if (error.code == WFSAppleIDDownloaderError2FARequired)
+					if (error.code == WFSAppleIDDownloaderErrorCancelled)
 					{
-						[self showAlert:@"Sign In Failed" message:@"The verification code was rejected or expired. Please try signing in again."];
 						completion(NO);
 						return;
 					}
-					if (error.code == WFSAppleIDDownloaderErrorCancelled)
+					if (error.code == WFSAppleIDDownloaderError2FARequired)
 					{
+						[self showAlert:@"Two-Factor Authentication" message:@"The verification code was rejected or expired. Please try signing in again with the latest code from your trusted device."];
+						completion(NO);
+						return;
+					}
+					if (error.code == WFSAppleIDDownloaderErrorPasswordTokenExpired)
+					{
+						[self showAlert:@"Sign In Failed" message:@"Your Apple ID session has expired. Please sign in again."];
 						completion(NO);
 						return;
 					}
