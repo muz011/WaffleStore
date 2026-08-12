@@ -2,8 +2,7 @@
 The best [MuffinStore](https://github.com/mineek/MuffinStore) fork.
 
 ## Credits
-Special thanks to [mineek](https://github.com/mineek) for creating the original app!
-Special thanks to [Kate](https://github.com/2x6k) for the app logo!
+Special thanks to [mineek](https://github.com/mineek) for creating the original app also, special thanks to [Kate](https://github.com/2x6k) for the app logo!
 
 ## Installation
 Grab the latest .tipa file from [Releases](https://github.com/muz011/WaffleStore/releases/latest) and install it with TrollStore!
