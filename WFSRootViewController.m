@@ -768,7 +768,7 @@
 {
 	dispatch_async(dispatch_get_main_queue(), ^
 	{
-		UIAlertController* codeAlert = [UIAlertController alertControllerWithTitle:@"Two-Factor Authentication" message:@"Enter the verification code sent to your trusted devices." preferredStyle:UIAlertControllerStyleAlert];
+		UIAlertController* codeAlert = [UIAlertController alertControllerWithTitle:@"Two-Factor Authentication" message:@"Enter the 6-digit verification code for this Apple ID.\n\nNo code arrived? Generate one from any device signed in to this Apple ID: Settings > [your name] > Sign-in & Security > Two-Factor Authentication > Get Verification Code. Codes expire quickly, so enter it right away." preferredStyle:UIAlertControllerStyleAlert];
 		[codeAlert addTextFieldWithConfigurationHandler:^(UITextField* textField)
 		{
 			textField.placeholder = @"6-digit code";
@@ -801,7 +801,7 @@
 					}
 					if (error.code == WFSAppleIDDownloaderError2FARequired)
 					{
-						[self showAlert:@"Two-Factor Authentication" message:@"The verification code was rejected or expired. Please try signing in again with the latest code from your trusted device."];
+						[self showAlert:@"Sign In Failed" message:@"The verification code was rejected or expired. Make sure the code is fresh and your Apple ID password is correct, then try signing in again."];
 						completion(NO);
 						return;
 					}

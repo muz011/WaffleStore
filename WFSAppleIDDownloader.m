@@ -457,6 +457,11 @@ static const NSInteger kWFSMaxAuthAttempts = 100;
 			return;
 		}
 		[diagnostics addObject:[NSString stringWithFormat:@"POST %@ -> HTTP %ld (%lu bytes)", urlString, (long)response.statusCode, (unsigned long)data.length]];
+		NSDictionary* authDict = [self parsePlistResponse:data];
+		NSString* authFailureType = authDict ? [self stringForKey:@"failureType" in:authDict] : nil;
+		NSString* authMessage = authDict ? [self stringForKey:@"customerMessage" in:authDict] : nil;
+		[diagnostics addObject:[NSString stringWithFormat:@"  failureType=%@ customerMessage=%@", authFailureType ?: @"(non-plist)", authMessage ?: @"(none)"]];
+		[self writeRawResponseData:data label:@"auth"];
 		if (response.statusCode >= 300 && response.statusCode < 400)
 		{
 			NSString* location = response.allHeaderFields[@"Location"];
@@ -475,11 +480,13 @@ static const NSInteger kWFSMaxAuthAttempts = 100;
 		}
 		if (processError.code == WFSAppleIDDownloaderError2FARequired || processError.code == WFSAppleIDDownloaderErrorBrowserSignInRequired)
 		{
+			[self writeAuthDiagnostics:diagnostics];
 			[self finishAuth:completion error:processError];
 			return;
 		}
 		[diagnostics addObject:[NSString stringWithFormat:@"  unusable response: %@", processError.localizedDescription]];
-		[self retryAuthWithCandidates:candidates index:index + 1 attempt:attempt retryCount:retryCount diagnostics:diagnostics completion:completion];
+		NSInteger nextAttempt = [processError.userInfo[@"wfsTransientRetry"] boolValue] ? attempt + 1 : attempt;
+		[self retryAuthWithCandidates:candidates index:index + 1 attempt:nextAttempt retryCount:retryCount diagnostics:diagnostics completion:completion];
 	}];
 }
 
@@ -492,13 +499,7 @@ static const NSInteger kWFSMaxAuthAttempts = 100;
 
 - (NSError*)authExhaustedErrorWithDiagnostics:(NSMutableArray*)diagnostics
 {
-	NSString* logPath = [[NSHomeDirectory() stringByAppendingPathComponent:@"Documents"] stringByAppendingPathComponent:@"WaffleStore_appleid.log"];
-	NSString* logContents = [NSString stringWithFormat:@"WaffleStore Apple ID sign-in diagnostics\n%@\n", [NSDate date]];
-	for (NSString* line in diagnostics)
-	{
-		logContents = [logContents stringByAppendingFormat:@"%@\n", line];
-	}
-	[logContents writeToFile:logPath atomically:YES encoding:NSUTF8StringEncoding error:nil];
+	[self writeAuthDiagnostics:diagnostics];
 
 	BOOL anyServerResponse = NO;
 	for (NSString* line in diagnostics)
@@ -534,7 +535,7 @@ static const NSInteger kWFSMaxAuthAttempts = 100;
 	NSString* customerMessage = [self stringForKey:@"customerMessage" in:dict];
 	if (attempt == 1 && [failureType isEqualToString:kWFSFailureTypeInvalidCredentials])
 	{
-		return [self errorWithCode:WFSAppleIDDownloaderErrorInvalidResponse message:@"Apple reported a transient sign-in error; retrying."];
+		return [self errorWithCode:WFSAppleIDDownloaderErrorInvalidResponse message:@"Apple reported a transient sign-in error; retrying." userInfo:@{@"wfsTransientRetry": @YES}];
 	}
 	if (failureType.length == 0 && !self.twoFactorCodeSent && [customerMessage isEqualToString:kWFSBadLoginMessage])
 	{
@@ -555,6 +556,10 @@ static const NSInteger kWFSMaxAuthAttempts = 100;
 	if (failureType.length)
 	{
 		NSString* message = customerMessage.length ? customerMessage : @"Apple authentication failed.";
+		if ([customerMessage isEqualToString:kWFSBadLoginMessage])
+		{
+			message = @"Apple ID or password was entered incorrectly.";
+		}
 		return [self errorWithCode:WFSAppleIDDownloaderErrorAuthenticationFailed message:message];
 	}
 	if (statusCode != 200)
@@ -1007,7 +1012,25 @@ static const NSInteger kWFSMaxAuthAttempts = 100;
 
 - (NSError*)errorWithCode:(NSInteger)code message:(NSString*)message
 {
-	return [NSError errorWithDomain:WFSAppleIDDownloaderErrorDomain code:code userInfo:@{NSLocalizedDescriptionKey: message ?: @"Unknown error"}];
+	return [self errorWithCode:code message:message userInfo:nil];
+}
+
+- (NSError*)errorWithCode:(NSInteger)code message:(NSString*)message userInfo:(NSDictionary*)userInfo
+{
+	NSMutableDictionary* info = [NSMutableDictionary dictionaryWithDictionary:userInfo ?: @{}];
+	info[NSLocalizedDescriptionKey] = message ?: @"Unknown error";
+	return [NSError errorWithDomain:WFSAppleIDDownloaderErrorDomain code:code userInfo:info];
+}
+
+- (void)writeAuthDiagnostics:(NSArray*)diagnostics
+{
+	NSString* logPath = [[NSHomeDirectory() stringByAppendingPathComponent:@"Documents"] stringByAppendingPathComponent:@"WaffleStore_appleid.log"];
+	NSString* logContents = [NSString stringWithFormat:@"WaffleStore Apple ID sign-in diagnostics\n%@\n", [NSDate date]];
+	for (NSString* line in diagnostics)
+	{
+		logContents = [logContents stringByAppendingFormat:@"%@\n", line];
+	}
+	[logContents writeToFile:logPath atomically:YES encoding:NSUTF8StringEncoding error:nil];
 }
 
 - (NSError*)networkError:(NSError*)error
