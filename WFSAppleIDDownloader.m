@@ -109,7 +109,8 @@ static const NSInteger kWFSMaxAuthAttempts = 100;
 		[self finishAuth:completion error:[self errorWithCode:WFSAppleIDDownloaderErrorAuthenticationFailed message:@"No sign-in in progress."]];
 		return;
 	}
-	self.password = [NSString stringWithFormat:@"%@%@", self.password, [[(code ?: @"") stringByReplacingOccurrencesOfString:@" " withString:@""]]];
+	NSString* sanitizedCode = [(code ?: @"") stringByReplacingOccurrencesOfString:@" " withString:@""];
+	self.password = [NSString stringWithFormat:@"%@%@", self.password, sanitizedCode];
 	self.twoFactorCodeSent = YES;
 	[self tryAuthenticateWithAttempt:1 completion:completion];
 }
