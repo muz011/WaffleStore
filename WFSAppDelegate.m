@@ -3,6 +3,7 @@
 #import "WFSPurchasedAppsViewController.h"
 #import "WFSAuthTestViewController.h"
 #import "WFSDownloadTestViewController.h"
+#import "WFSVersionTestViewController.h"
 
 static void WFSUncaughtExceptionHandler(NSException* exception)
 {
@@ -43,8 +44,12 @@ static void WFSUncaughtExceptionHandler(NSException* exception)
 	UINavigationController* downloadTestNavigationController = [[UINavigationController alloc] initWithRootViewController:downloadTestViewController];
 	downloadTestNavigationController.tabBarItem = [[UITabBarItem alloc] initWithTitle:@"downloadTest" image:[UIImage systemImageNamed:@"icloud.and.arrow.down"] selectedImage:[UIImage systemImageNamed:@"icloud.and.arrow.down.fill"]];
 
+	WFSVersionTestViewController* versionTestViewController = [WFSVersionTestViewController new];
+	UINavigationController* versionTestNavigationController = [[UINavigationController alloc] initWithRootViewController:versionTestViewController];
+	versionTestNavigationController.tabBarItem = [[UITabBarItem alloc] initWithTitle:@"verTest" image:[UIImage systemImageNamed:@"list.number"] selectedImage:[UIImage systemImageNamed:@"list.number"]];
+
 	UITabBarController* tabBarController = [UITabBarController new];
-	tabBarController.viewControllers = @[downgradeNavigationController, purchasesNavigationController, authTestNavigationController, downloadTestNavigationController];
+	tabBarController.viewControllers = @[downgradeNavigationController, purchasesNavigationController, authTestNavigationController, downloadTestNavigationController, versionTestNavigationController];
 	if (@available(iOS 15.0, *))
 	{
 		UITabBarAppearance* appearance = [UITabBarAppearance new];

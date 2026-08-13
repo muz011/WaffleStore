@@ -289,6 +289,98 @@ static const NSInteger kWFSMaxAuthAttempts = 100;
 	}];
 }
 
+- (void)getExternalVersionIdsForAdamId:(long long)adamId completion:(WFSAppleIDVersionsInfoCompletion)completion
+{
+	if (!self.authenticated)
+	{
+		[self finishVersionsInfo:completion externalVersionIds:nil metadata:nil error:[self errorWithCode:WFSAppleIDDownloaderErrorNotAuthenticated message:@"Not signed in to Apple ID. Use the authTest tab to sign in first."]];
+		return;
+	}
+	NSDictionary* body = @{
+		@"creditDisplay": @"",
+		@"guid": self.guid,
+		@"salableAdamId": [NSString stringWithFormat:@"%lld", adamId],
+	};
+	NSString* urlString = [NSString stringWithFormat:@"https://%@/WebObjects/MZFinance.woa/wa/volumeStoreDownloadProduct?guid=%@", [self buyHost], self.guid];
+	self.lastDownloadEndpoint = urlString;
+	[self postPlist:body toURL:[NSURL URLWithString:urlString] contentType:@"application/x-apple-plist" authenticated:YES tokenHeaders:NO completion:^(NSData* data, NSHTTPURLResponse* response, NSError* error)
+	{
+		if (error)
+		{
+			[self finishVersionsInfo:completion externalVersionIds:nil metadata:nil error:[self networkError:error]];
+			return;
+		}
+		[self writeDebugLog:[NSString stringWithFormat:@"listVersions(adamId=%lld) -> HTTP %ld (%lu bytes)", adamId, (long)response.statusCode, (unsigned long)data.length]];
+		[self writeRawResponseData:data label:@"versionTest"];
+		if (response.statusCode == 429)
+		{
+			[self finishVersionsInfo:completion externalVersionIds:nil metadata:nil error:[self errorWithCode:WFSAppleIDDownloaderErrorRateLimited message:@"Apple is rate limiting requests. Wait a few minutes and try again."]];
+			return;
+		}
+		NSDictionary* dict = [self parsePlistResponse:data];
+		if (!dict)
+		{
+			[self finishVersionsInfo:completion externalVersionIds:nil metadata:nil error:[self errorWithCode:WFSAppleIDDownloaderErrorInvalidResponse message:@"Apple returned an invalid response."]];
+			return;
+		}
+		NSString* failureType = [self stringForKey:@"failureType" in:dict];
+		if ([failureType isEqualToString:kWFSFailureTypeLicenseNotFound])
+		{
+			[self finishVersionsInfo:completion externalVersionIds:nil metadata:nil error:[self errorWithCode:WFSAppleIDDownloaderErrorLicenseNotFound message:@"No license found for this app."]];
+			return;
+		}
+		NSError* failureError = [self failureErrorFromResponse:dict];
+		if (failureError)
+		{
+			[self finishVersionsInfo:completion externalVersionIds:nil metadata:nil error:failureError];
+			return;
+		}
+		NSArray* songList = dict[@"songList"];
+		NSDictionary* song = nil;
+		if ([songList isKindOfClass:[NSArray class]] && songList.count > 0)
+		{
+			song = songList[0];
+		}
+		if (![song isKindOfClass:[NSDictionary class]])
+		{
+			[self finishVersionsInfo:completion externalVersionIds:nil metadata:nil error:[self errorWithCode:WFSAppleIDDownloaderErrorNoSong message:@"Apple did not return version information for this app."]];
+			return;
+		}
+		NSDictionary* metadata = [song[@"metadata"] isKindOfClass:[NSDictionary class]] ? song[@"metadata"] : nil;
+		id rawIdentifiers = metadata[@"softwareVersionExternalIdentifiers"];
+		NSMutableArray* identifiers = [NSMutableArray array];
+		if ([rawIdentifiers isKindOfClass:[NSArray class]])
+		{
+			for (id identifier in (NSArray*)rawIdentifiers)
+			{
+				[identifiers addObject:[self stringValueForObject:identifier]];
+			}
+		}
+		[self finishVersionsInfo:completion externalVersionIds:identifiers metadata:metadata error:nil];
+	}];
+}
+
+- (void)finishVersionsInfo:(WFSAppleIDVersionsInfoCompletion)completion externalVersionIds:(NSArray*)externalVersionIds metadata:(NSDictionary*)metadata error:(NSError*)error
+{
+	dispatch_async(dispatch_get_main_queue(), ^
+	{
+		completion(externalVersionIds, metadata, error);
+	});
+}
+
+- (NSString*)stringValueForObject:(id)object
+{
+	if ([object isKindOfClass:[NSString class]])
+	{
+		return object;
+	}
+	if ([object isKindOfClass:[NSNumber class]])
+	{
+		return [object stringValue];
+	}
+	return @"";
+}
+
 - (void)searchPurchaseHistoryForBundleID:(NSString*)bundleID completion:(WFSAppleIDPurchaseSearchCompletion)completion
 {
 	if (!self.authenticated)

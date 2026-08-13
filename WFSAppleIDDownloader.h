@@ -24,6 +24,7 @@ typedef void (^WFSAppleIDAuthCompletion)(NSError* _Nullable error);
 typedef void (^WFSAppleIDVersionsCompletion)(NSArray* _Nullable versions, NSDictionary* _Nullable metadata, NSError* _Nullable error);
 typedef void (^WFSAppleIDDownloadInfoCompletion)(NSURL* _Nullable ipaURL, NSDictionary* _Nullable metadata, NSError* _Nullable error);
 typedef void (^WFSAppleIDPurchaseSearchCompletion)(NSDictionary* _Nullable purchase, NSError* _Nullable error);
+typedef void (^WFSAppleIDVersionsInfoCompletion)(NSArray* _Nullable externalVersionIds, NSDictionary* _Nullable metadata, NSError* _Nullable error);
 typedef void (^WFSAppleIDAuthProgressHandler)(NSUInteger attempt, NSUInteger totalAttempts);
 
 @interface WFSAppleIDDownloader : NSObject
@@ -47,6 +48,7 @@ typedef void (^WFSAppleIDAuthProgressHandler)(NSUInteger attempt, NSUInteger tot
 - (void)getVersionsForAppId:(long long)appId completion:(WFSAppleIDVersionsCompletion)completion;
 - (void)getDownloadInfoForAppId:(long long)appId versionId:(long long)versionId completion:(WFSAppleIDDownloadInfoCompletion)completion;
 - (void)getDownloadInfoForAdamId:(long long)adamId versionId:(long long)versionId autoPurchase:(BOOL)autoPurchase completion:(WFSAppleIDDownloadInfoCompletion)completion;
+- (void)getExternalVersionIdsForAdamId:(long long)adamId completion:(WFSAppleIDVersionsInfoCompletion)completion;
 - (void)searchPurchaseHistoryForBundleID:(NSString*)bundleID completion:(WFSAppleIDPurchaseSearchCompletion)completion;
 
 @end
