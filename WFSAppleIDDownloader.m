@@ -532,16 +532,18 @@ static const NSInteger kWFSMaxAuthAttempts = 100;
 
 - (void)fetchPurchaseHistoryPage:(NSInteger)pageNumber firstResponse:(NSDictionary*)firstResponse purchases:(NSMutableArray*)purchases stopAdamId:(NSString*)stopAdamId completion:(void (^)(NSArray* purchases, NSDictionary* firstResponse, NSError* error))completion
 {
+	__block NSDictionary* mutableFirstResponse = firstResponse;
+	__block NSString* mutableStopAdamId = stopAdamId;
 	[self getPurchaseHistoryForPage:pageNumber completion:^(NSArray* pagePurchases, NSDictionary* response, NSError* error)
 	{
 		if (error)
 		{
-			completion(purchases, firstResponse, error);
+			completion(purchases, mutableFirstResponse, error);
 			return;
 		}
-		if (!firstResponse)
+		if (!mutableFirstResponse)
 		{
-			firstResponse = response;
+			mutableFirstResponse = response;
 		}
 		NSMutableArray* merged = [NSMutableArray arrayWithArray:purchases];
 		[merged addObjectsFromArray:pagePurchases];
@@ -551,22 +553,22 @@ static const NSInteger kWFSMaxAuthAttempts = 100;
 		}
 		if (!pagePurchases.count || pageNumber >= 49)
 		{
-			completion(merged, firstResponse, nil);
+			completion(merged, mutableFirstResponse, nil);
 			return;
 		}
 		NSString* firstAdamId = [self stringForKey:@"adamId" in:pagePurchases.firstObject];
-		if (stopAdamId.length && firstAdamId.length && [firstAdamId isEqualToString:stopAdamId])
+		if (mutableStopAdamId.length && firstAdamId.length && [firstAdamId isEqualToString:mutableStopAdamId])
 		{
-			completion(merged, firstResponse, nil);
+			completion(merged, mutableFirstResponse, nil);
 			return;
 		}
-		if (!stopAdamId)
+		if (!mutableStopAdamId)
 		{
-			stopAdamId = firstAdamId;
+			mutableStopAdamId = firstAdamId;
 		}
 		dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.4 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^
 		{
-			[self fetchPurchaseHistoryPage:pageNumber + 1 firstResponse:firstResponse purchases:merged stopAdamId:stopAdamId completion:completion];
+			[self fetchPurchaseHistoryPage:pageNumber + 1 firstResponse:mutableFirstResponse purchases:merged stopAdamId:mutableStopAdamId completion:completion];
 		});
 	}];
 }
