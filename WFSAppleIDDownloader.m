@@ -4,6 +4,7 @@
 NSString* const WFSAppleIDDownloaderErrorDomain = @"WFSAppleIDDownloaderErrorDomain";
 
 static NSString* const kWFSConfiguratorUA = @"Configurator/2.17 (Macintosh; OS X 15.2; 24C5089c) AppleWebKit/0620.1.16.11.6";
+static NSString* const kWFSStoreElementsUA = @"iTunes/12.13.2 (Windows; Microsoft Windows 10 x64 Professional Edition (Build 19045); x64) AppleWebKit/12600.1.0.0.15";
 static NSString* const kWFSFastAuthEndpoint = @"https://auth.itunes.apple.com/auth/v1/native/fast/";
 static NSString* const kWFSLegacyAuthEndpoint = @"https://buy.itunes.apple.com/WebObjects/MZFinance.woa/wa/authenticate";
 static NSString* const kWFSInitBagEndpoint = @"https://init.itunes.apple.com/bag.xml?guid=%@";
@@ -524,6 +525,12 @@ static const NSInteger kWFSMaxAuthAttempts = 100;
 		NSDictionary* json = [self parseJSONResponse:data];
 		if (!json)
 		{
+			NSString* upgradeMessage = [self upgradePageMessageFromData:data];
+			if (upgradeMessage)
+			{
+				completion(nil, nil, [self errorWithCode:WFSAppleIDDownloaderErrorInvalidResponse message:upgradeMessage]);
+				return;
+			}
 			NSString* contentType = response.allHeaderFields[@"Content-Type"];
 			if (![contentType isKindOfClass:[NSString class]])
 			{
@@ -596,6 +603,12 @@ static const NSInteger kWFSMaxAuthAttempts = 100;
 		NSDictionary* json = [self parseJSONResponse:data];
 		if (!json)
 		{
+			NSString* upgradeMessage = [self upgradePageMessageFromData:data];
+			if (upgradeMessage)
+			{
+				[self finishHistory:completion purchases:purchases response:firstResponse error:[self errorWithCode:WFSAppleIDDownloaderErrorInvalidResponse message:upgradeMessage]];
+				return;
+			}
 			NSString* contentType = response.allHeaderFields[@"Content-Type"];
 			if (![contentType isKindOfClass:[NSString class]])
 			{
@@ -1264,7 +1277,7 @@ static const NSInteger kWFSMaxAuthAttempts = 100;
 	NSData* bodyData = [bodyString dataUsingEncoding:NSUTF8StringEncoding];
 	NSMutableURLRequest* request = [NSMutableURLRequest requestWithURL:url];
 	request.HTTPMethod = @"POST";
-	[request setValue:kWFSConfiguratorUA forHTTPHeaderField:@"User-Agent"];
+	[request setValue:kWFSStoreElementsUA forHTTPHeaderField:@"User-Agent"];
 	[request setValue:@"application/x-www-form-urlencoded" forHTTPHeaderField:@"Content-Type"];
 	[request setValue:@"*/*" forHTTPHeaderField:@"Accept"];
 	if (authenticated)
@@ -1419,6 +1432,24 @@ static const NSInteger kWFSMaxAuthAttempts = 100;
 		[hex appendFormat:@"%02x", bytes[i]];
 	}
 	return [NSString stringWithFormat:@"(non-text body, %lu bytes) %@", (unsigned long)data.length, hex];
+}
+
+- (NSString*)upgradePageMessageFromData:(NSData*)data
+{
+	if (!data.length)
+	{
+		return nil;
+	}
+	NSString* text = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
+	if (!text.length)
+	{
+		return nil;
+	}
+	if ([text containsString:@"pageiTunes10Upgrade"] || [text containsString:@"<key>Goto</key>"])
+	{
+		return @"Apple rejected the purchase history request as an unsupported client (pageiTunes10Upgrade). The store server did not recognize the client version and returned an upgrade page instead of purchase data.";
+	}
+	return nil;
 }
 
 - (NSDictionary*)parsePlistResponse:(NSData*)data
