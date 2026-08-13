@@ -4,7 +4,7 @@
 NSString* const WFSAppleIDDownloaderErrorDomain = @"WFSAppleIDDownloaderErrorDomain";
 
 static NSString* const kWFSConfiguratorUA = @"Configurator/2.17 (Macintosh; OS X 15.2; 24C5089c) AppleWebKit/0620.1.16.11.6";
-static NSString* const kWFSStoreElementsUA = @"iTunes/12.13.2 (Windows; Microsoft Windows 10 x64 Professional Edition (Build 19045); x64) AppleWebKit/12600.1.0.0.15";
+static NSString* const kWFSStoreElementsUA = @"Configurator/2.17 (Macintosh; macOS 15.2; 24C5089c) AppleWebKit/0620.1.16.11.6";
 static NSString* const kWFSFastAuthEndpoint = @"https://auth.itunes.apple.com/auth/v1/native/fast/";
 static NSString* const kWFSLegacyAuthEndpoint = @"https://buy.itunes.apple.com/WebObjects/MZFinance.woa/wa/authenticate";
 static NSString* const kWFSInitBagEndpoint = @"https://init.itunes.apple.com/bag.xml?guid=%@";
