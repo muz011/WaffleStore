@@ -399,7 +399,7 @@
 			NSString* bundleId = purchase[@"bundleId"];
 			NSString* purchaseDate = purchase[@"purchaseDate"];
 			NSString* orderId = purchase[@"orderId"];
-			[self appendLog:[NSString stringWithFormat:@"%lu. %@ #%@ %@ %@ (order %@)", (unsigned long)(i + 1), title ?: @"(untitled)", adamId ?: @"?", bundleId ?: @"?", purchaseDate ?: @"?", orderId ?: @"?")]];
+			[self appendLog:[NSString stringWithFormat:@"%lu. %@ #%@ %@ %@ (order %@)", (unsigned long)(i + 1), title ?: @"(untitled)", adamId ?: @"?", bundleId ?: @"?", purchaseDate ?: @"?", orderId ?: @"?"]];
 		}
 	}];
 }
