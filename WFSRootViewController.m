@@ -55,12 +55,6 @@
 		downloadSpecifier.buttonAction = @selector(downloadApp);
 		[_specifiers addObject:downloadSpecifier];
 
-		PSSpecifier* appleIdDownloadSpecifier = [PSSpecifier preferenceSpecifierNamed:@"Download with Apple ID" target:self set:nil get:nil detail:nil cell:PSButtonCell edit:nil];
-		appleIdDownloadSpecifier.identifier = @"appleIdDownload";
-		[appleIdDownloadSpecifier setProperty:@YES forKey:@"enabled"];
-		appleIdDownloadSpecifier.buttonAction = @selector(downloadAppWithAppleID);
-		[_specifiers addObject:appleIdDownloadSpecifier];
-
 		NSString* aboutText = [self getAboutText];
 		[downloadGroupSpecifier setProperty:aboutText forKey:@"footerText"];
 
@@ -649,29 +643,6 @@
 }
 
 #pragma mark - Apple ID download
-
-- (void)downloadAppWithAppleID
-{
-	UIAlertController* linkAlert = [UIAlertController alertControllerWithTitle:@"App Link" message:@"Enter the App Store link to the app you want to download with your Apple ID." preferredStyle:UIAlertControllerStyleAlert];
-	[linkAlert addTextFieldWithConfigurationHandler:^(UITextField* textField)
-	{
-		textField.placeholder = @"https://apps.apple.com/app/idXXXXXXXXX";
-	}];
-	UIAlertAction* continueAction = [UIAlertAction actionWithTitle:@"Continue" style:UIAlertActionStyleDefault handler:^(UIAlertAction* action)
-	{
-		long long appId = [self parseAppIdFromLink:linkAlert.textFields.firstObject.text];
-		if (appId <= 0)
-		{
-			[self showAlert:@"Error" message:@"Invalid link"];
-			return;
-		}
-		[self startAppleIDDownloadForAppId:appId];
-	}];
-	[linkAlert addAction:continueAction];
-	UIAlertAction* cancelAction = [UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil];
-	[linkAlert addAction:cancelAction];
-	[self wfsPresentViewController:linkAlert];
-}
 
 - (void)startAppleIDDownloadForAppId:(long long)appId
 {

@@ -54,6 +54,7 @@ static const NSInteger kWFSMaxAuthAttempts = 100;
 @property (nonatomic, assign) BOOL twoFactorCodeSent;
 @property (nonatomic, copy, readwrite) NSString* authenticatedAppleId;
 @property (nonatomic, copy) NSDictionary* anisetteHeaders;
+@property (nonatomic, copy) NSString* lastAuthEndpoint;
 @end
 
 @implementation WFSAppleIDDownloader
@@ -120,6 +121,11 @@ static const NSInteger kWFSMaxAuthAttempts = 100;
 - (void)cancelAuthentication
 {
 	self.cancelRequested = YES;
+}
+
+- (BOOL)anisetteAvailable
+{
+	return self.anisetteHeaders.count > 0;
 }
 
 - (void)resetSession
@@ -507,6 +513,7 @@ static const NSInteger kWFSMaxAuthAttempts = 100;
 			return;
 		}
 		[diagnostics addObject:[NSString stringWithFormat:@"POST %@ -> HTTP %ld (%lu bytes)", urlString, (long)response.statusCode, (unsigned long)data.length]];
+		self.lastAuthEndpoint = urlString;
 		NSDictionary* authDict = [self parsePlistResponse:data];
 		NSString* authFailureType = authDict ? [self stringForKey:@"failureType" in:authDict] : nil;
 		NSString* authMessage = authDict ? [self stringForKey:@"customerMessage" in:authDict] : nil;
@@ -1131,6 +1138,7 @@ static const NSInteger kWFSMaxAuthAttempts = 100;
 	self.pod = nil;
 	self.twoFactorCodeSent = NO;
 	self.anisetteHeaders = nil;
+	self.lastAuthEndpoint = nil;
 }
 
 - (void)finishVersions:(WFSAppleIDVersionsCompletion)completion versions:(NSArray*)versions metadata:(NSDictionary*)metadata error:(NSError*)error

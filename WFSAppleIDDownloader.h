@@ -32,6 +32,10 @@ typedef void (^WFSAppleIDAuthProgressHandler)(NSUInteger attempt, NSUInteger tot
 
 @property (nonatomic, readonly, getter=isAuthenticated) BOOL authenticated;
 @property (nonatomic, copy, readonly, nullable) NSString* authenticatedAppleId;
+@property (nonatomic, copy, readonly, nullable) NSString* dsid;
+@property (nonatomic, copy, readonly, nullable) NSString* storeFront;
+@property (nonatomic, copy, readonly, nullable) NSString* lastAuthEndpoint;
+@property (nonatomic, readonly) BOOL anisetteAvailable;
 @property (nonatomic, copy, nullable) WFSAppleIDAuthProgressHandler authProgressHandler;
 
 - (void)authenticateWithAppleId:(NSString*)appleId password:(NSString*)password completion:(WFSAppleIDAuthCompletion)completion;
