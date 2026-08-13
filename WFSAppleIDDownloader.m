@@ -476,7 +476,7 @@ static const NSInteger kWFSMaxAuthAttempts = 100;
 		@"creditDisplay": @"",
 	};
 	NSString* pageQuery = @"";
-	if (pageNumber >= 0)
+	if (pageNumber >= 1)
 	{
 		pageQuery = [NSString stringWithFormat:@"&pageNumber=%ld", (long)pageNumber];
 	}
@@ -491,6 +491,12 @@ static const NSInteger kWFSMaxAuthAttempts = 100;
 		}
 		[self writeDebugLog:[NSString stringWithFormat:@"volumeStoreDownloadHistory(page=%ld) -> HTTP %ld (%lu bytes)", (long)pageNumber, (long)response.statusCode, (unsigned long)data.length]];
 		[self writeRawResponseData:data label:@"history"];
+		if (pageNumber >= 1 && response.statusCode == 404)
+		{
+			[self writeDebugLog:@"volumeStoreDownloadHistory 404 with pageNumber, retrying without pageNumber"];
+			[self getPurchaseHistoryForPage:0 completion:completion];
+			return;
+		}
 		if (response.statusCode == 429)
 		{
 			[self finishHistory:completion purchases:nil response:nil error:[self errorWithCode:WFSAppleIDDownloaderErrorRateLimited message:@"Apple is rate limiting requests. Wait a few minutes and try again."]];
@@ -533,7 +539,7 @@ static const NSInteger kWFSMaxAuthAttempts = 100;
 
 - (void)getAllPurchaseHistoryWithCompletion:(void (^)(NSArray* purchases, NSDictionary* firstResponse, NSError* error))completion
 {
-	[self fetchPurchaseHistoryPage:0 firstResponse:nil purchases:[NSMutableArray array] stopAdamId:nil completion:completion];
+	[self fetchPurchaseHistoryPage:1 firstResponse:nil purchases:[NSMutableArray array] stopAdamId:nil completion:completion];
 }
 
 - (void)fetchPurchaseHistoryPage:(NSInteger)pageNumber firstResponse:(NSDictionary*)firstResponse purchases:(NSMutableArray*)purchases stopAdamId:(NSString*)stopAdamId completion:(void (^)(NSArray* purchases, NSDictionary* firstResponse, NSError* error))completion
@@ -557,7 +563,7 @@ static const NSInteger kWFSMaxAuthAttempts = 100;
 		{
 			self.historyProgressHandler(pageNumber, (NSInteger)pagePurchases.count, (NSInteger)merged.count);
 		}
-		if (!pagePurchases.count || pageNumber >= 49)
+		if (!pagePurchases.count || pageNumber >= 50)
 		{
 			completion(merged, mutableFirstResponse, nil);
 			return;
