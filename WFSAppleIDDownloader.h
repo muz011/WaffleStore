@@ -35,6 +35,7 @@ typedef void (^WFSAppleIDAuthProgressHandler)(NSUInteger attempt, NSUInteger tot
 @property (nonatomic, copy, readonly, nullable) NSString* dsid;
 @property (nonatomic, copy, readonly, nullable) NSString* storeFront;
 @property (nonatomic, copy, readonly, nullable) NSString* lastAuthEndpoint;
+@property (nonatomic, copy, readonly, nullable) NSString* lastDownloadEndpoint;
 @property (nonatomic, readonly) BOOL anisetteAvailable;
 @property (nonatomic, copy, nullable) WFSAppleIDAuthProgressHandler authProgressHandler;
 
@@ -45,6 +46,7 @@ typedef void (^WFSAppleIDAuthProgressHandler)(NSUInteger attempt, NSUInteger tot
 
 - (void)getVersionsForAppId:(long long)appId completion:(WFSAppleIDVersionsCompletion)completion;
 - (void)getDownloadInfoForAppId:(long long)appId versionId:(long long)versionId completion:(WFSAppleIDDownloadInfoCompletion)completion;
+- (void)getDownloadInfoForAdamId:(long long)adamId versionId:(long long)versionId autoPurchase:(BOOL)autoPurchase completion:(WFSAppleIDDownloadInfoCompletion)completion;
 - (void)searchPurchaseHistoryForBundleID:(NSString*)bundleID completion:(WFSAppleIDPurchaseSearchCompletion)completion;
 
 @end

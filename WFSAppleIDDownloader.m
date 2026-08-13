@@ -55,6 +55,7 @@ static const NSInteger kWFSMaxAuthAttempts = 100;
 @property (nonatomic, copy, readwrite) NSString* authenticatedAppleId;
 @property (nonatomic, copy) NSDictionary* anisetteHeaders;
 @property (nonatomic, copy) NSString* lastAuthEndpoint;
+@property (nonatomic, copy) NSString* lastDownloadEndpoint;
 @end
 
 @implementation WFSAppleIDDownloader
@@ -198,6 +199,93 @@ static const NSInteger kWFSMaxAuthAttempts = 100;
 			return;
 		}
 		[self finishDownloadInfo:completion url:url metadata:[self metadataFromSong:song] error:nil];
+	}];
+}
+
+- (void)getDownloadInfoForAdamId:(long long)adamId versionId:(long long)versionId autoPurchase:(BOOL)autoPurchase completion:(WFSAppleIDDownloadInfoCompletion)completion
+{
+	if (!self.authenticated)
+	{
+		[self finishDownloadInfo:completion url:nil metadata:nil error:[self errorWithCode:WFSAppleIDDownloaderErrorNotAuthenticated message:@"Not signed in to Apple ID. Use the authTest tab to sign in first."]];
+		return;
+	}
+	NSMutableDictionary* body = [NSMutableDictionary dictionary];
+	body[@"creditDisplay"] = @"";
+	body[@"guid"] = self.guid;
+	body[@"salableAdamId"] = [NSString stringWithFormat:@"%lld", adamId];
+	if (versionId > 0)
+	{
+		body[@"externalVersionId"] = [NSString stringWithFormat:@"%lld", versionId];
+	}
+	NSString* urlString = [NSString stringWithFormat:@"https://%@/WebObjects/MZFinance.woa/wa/volumeStoreDownloadProduct?guid=%@", [self buyHost], self.guid];
+	self.lastDownloadEndpoint = urlString;
+	[self postPlist:body toURL:[NSURL URLWithString:urlString] contentType:@"application/x-apple-plist" authenticated:YES tokenHeaders:NO completion:^(NSData* data, NSHTTPURLResponse* response, NSError* error)
+	{
+		if (error)
+		{
+			[self finishDownloadInfo:completion url:nil metadata:nil error:[self networkError:error]];
+			return;
+		}
+		[self writeDebugLog:[NSString stringWithFormat:@"volumeStoreDownloadProduct(adamId=%lld, versionId=%lld) -> HTTP %ld (%lu bytes)", adamId, versionId, (long)response.statusCode, (unsigned long)data.length]];
+		[self writeRawResponseData:data label:@"downloadTest"];
+		if (response.statusCode == 429)
+		{
+			[self finishDownloadInfo:completion url:nil metadata:nil error:[self errorWithCode:WFSAppleIDDownloaderErrorRateLimited message:@"Apple is rate limiting requests. Wait a few minutes and try again."]];
+			return;
+		}
+		NSDictionary* dict = [self parsePlistResponse:data];
+		if (!dict)
+		{
+			[self finishDownloadInfo:completion url:nil metadata:nil error:[self errorWithCode:WFSAppleIDDownloaderErrorInvalidResponse message:@"Apple returned an invalid response."]];
+			return;
+		}
+		NSString* failureType = [self stringForKey:@"failureType" in:dict];
+		NSString* customerMessage = [self stringForKey:@"customerMessage" in:dict];
+		if ([failureType isEqualToString:kWFSFailureTypeLicenseNotFound])
+		{
+			if (autoPurchase)
+			{
+				[self writeDebugLog:[NSString stringWithFormat:@"failureType %@ detected, purchasing license first", kWFSFailureTypeLicenseNotFound]];
+				[self buyProductForAppId:adamId completion:^(NSError* buyError)
+				{
+					if (buyError)
+					{
+						[self finishDownloadInfo:completion url:nil metadata:nil error:buyError];
+						return;
+					}
+					[self getDownloadInfoForAdamId:adamId versionId:versionId autoPurchase:NO completion:completion];
+				}];
+				return;
+			}
+			[self finishDownloadInfo:completion url:nil metadata:nil error:[self errorWithCode:WFSAppleIDDownloaderErrorLicenseNotFound message:customerMessage.length ? customerMessage : @"No license found for this app. Enable auto-purchase to obtain one first."]];
+			return;
+		}
+		NSError* failureError = [self failureErrorFromResponse:dict];
+		if (failureError)
+		{
+			[self finishDownloadInfo:completion url:nil metadata:nil error:failureError];
+			return;
+		}
+		NSArray* songList = dict[@"songList"];
+		NSDictionary* song = nil;
+		if ([songList isKindOfClass:[NSArray class]] && songList.count > 0)
+		{
+			song = songList[0];
+		}
+		if (![song isKindOfClass:[NSDictionary class]])
+		{
+			[self finishDownloadInfo:completion url:nil metadata:nil error:[self errorWithCode:WFSAppleIDDownloaderErrorNoSong message:@"Apple did not return download information for this app."]];
+			return;
+		}
+		NSString* songURLString = [self stringForKey:@"URL" in:song];
+		NSURL* songURL = songURLString.length ? [NSURL URLWithString:songURLString] : nil;
+		if (!songURL)
+		{
+			[self finishDownloadInfo:completion url:nil metadata:nil error:[self errorWithCode:WFSAppleIDDownloaderErrorNoSong message:@"Apple did not return a download URL for this app."]];
+			return;
+		}
+		NSDictionary* metadata = [song[@"metadata"] isKindOfClass:[NSDictionary class]] ? song[@"metadata"] : nil;
+		[self finishDownloadInfo:completion url:songURL metadata:metadata error:nil];
 	}];
 }
 
@@ -1139,6 +1227,7 @@ static const NSInteger kWFSMaxAuthAttempts = 100;
 	self.twoFactorCodeSent = NO;
 	self.anisetteHeaders = nil;
 	self.lastAuthEndpoint = nil;
+	self.lastDownloadEndpoint = nil;
 }
 
 - (void)finishVersions:(WFSAppleIDVersionsCompletion)completion versions:(NSArray*)versions metadata:(NSDictionary*)metadata error:(NSError*)error
