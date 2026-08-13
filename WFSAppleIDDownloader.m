@@ -464,46 +464,65 @@ static const NSInteger kWFSMaxAuthAttempts = 100;
 	}];
 }
 
-- (void)getPurchaseHistoryForPage:(NSInteger)pageNumber completion:(WFSAppleIDHistoryCompletion)completion
+- (void)getAllPurchaseHistoryWithCompletion:(void (^)(NSArray* purchases, NSDictionary* firstResponse, NSError* error))completion
 {
 	if (!self.authenticated)
 	{
 		[self finishHistory:completion purchases:nil response:nil error:[self errorWithCode:WFSAppleIDDownloaderErrorNotAuthenticated message:@"Not signed in to Apple ID. Use the authTest tab to sign in first."]];
 		return;
 	}
-	NSDictionary* body = @{
-		@"guid": self.guid,
-		@"creditDisplay": @"",
-	};
-	NSString* pageQuery = @"";
-	if (pageNumber >= 1)
-	{
-		pageQuery = [NSString stringWithFormat:@"&pageNumber=%ld", (long)pageNumber];
-	}
-	NSString* urlString = [NSString stringWithFormat:@"https://%@/WebObjects/MZFinance.woa/wa/volumeStoreDownloadHistory?guid=%@%@", [self buyHost], self.guid, pageQuery];
-	self.lastDownloadEndpoint = urlString;
-	[self postPlist:body toURL:[NSURL URLWithString:urlString] contentType:@"application/x-apple-plist" authenticated:YES completion:^(NSData* data, NSHTTPURLResponse* response, NSError* error)
+	[self fetchLockerDataWithRestoreMode:@"undefined" completion:^(NSArray* appIds, NSDictionary* response, NSError* error)
 	{
 		if (error)
 		{
-			[self finishHistory:completion purchases:nil response:nil error:[self networkError:error]];
+			[self finishHistory:completion purchases:nil response:nil error:error];
 			return;
 		}
-		[self writeDebugLog:[NSString stringWithFormat:@"volumeStoreDownloadHistory(page=%ld) -> HTTP %ld (%lu bytes)", (long)pageNumber, (long)response.statusCode, (unsigned long)data.length]];
-		[self writeRawResponseData:data label:@"history"];
-		if (pageNumber >= 1 && response.statusCode == 404)
+		[self fetchLockerDataWithRestoreMode:@"true" completion:^(NSArray* hiddenAppIds, NSDictionary* hiddenResponse, NSError* hiddenError)
 		{
-			[self writeDebugLog:@"volumeStoreDownloadHistory 404 with pageNumber, retrying without pageNumber"];
-			[self getPurchaseHistoryForPage:0 completion:completion];
+			NSMutableArray* allAppIds = [NSMutableArray arrayWithArray:appIds];
+			if (!hiddenError)
+			{
+				for (NSString* appId in hiddenAppIds)
+				{
+					if (appId.length && ![allAppIds containsObject:appId])
+					{
+						[allAppIds addObject:appId];
+					}
+				}
+			}
+			[self fetchContentDataForAppIds:allAppIds index:0 purchases:[NSMutableArray array] firstResponse:response completion:completion];
+		}];
+	}];
+}
+
+- (void)fetchLockerDataWithRestoreMode:(NSString*)restoreMode completion:(void (^)(NSArray* appIds, NSDictionary* response, NSError* error))completion
+{
+	NSString* storeFrontId = [self storeFrontIdForPurchases];
+	NSString* urlString = [NSString stringWithFormat:@"https://se.itunes.apple.com/WebObjects/MZStoreElements.woa/wa/purchases?s=%@", storeFrontId];
+	self.lastDownloadEndpoint = urlString;
+	NSDictionary* params = @{
+		@"action": @"POST",
+		@"mt": @"8",
+		@"vt": @"lockerData",
+		@"restoreMode": restoreMode,
+	};
+	[self postForm:params toURL:[NSURL URLWithString:urlString] authenticated:YES completion:^(NSData* data, NSHTTPURLResponse* response, NSError* error)
+	{
+		if (error)
+		{
+			completion(nil, nil, [self networkError:error]);
 			return;
 		}
+		[self writeDebugLog:[NSString stringWithFormat:@"purchases(lockerData, restoreMode=%@) -> HTTP %ld (%lu bytes)", restoreMode, (long)response.statusCode, (unsigned long)data.length]];
+		[self writeRawResponseData:data label:@"history"];
 		if (response.statusCode == 429)
 		{
-			[self finishHistory:completion purchases:nil response:nil error:[self errorWithCode:WFSAppleIDDownloaderErrorRateLimited message:@"Apple is rate limiting requests. Wait a few minutes and try again."]];
+			completion(nil, nil, [self errorWithCode:WFSAppleIDDownloaderErrorRateLimited message:@"Apple is rate limiting requests. Wait a few minutes and try again."]);
 			return;
 		}
-		NSDictionary* dict = [self parsePlistResponse:data];
-		if (!dict)
+		NSDictionary* json = [self parseJSONResponse:data];
+		if (!json)
 		{
 			NSString* contentType = response.allHeaderFields[@"Content-Type"];
 			if (![contentType isKindOfClass:[NSString class]])
@@ -511,78 +530,140 @@ static const NSInteger kWFSMaxAuthAttempts = 100;
 				contentType = @"?";
 			}
 			NSString* excerpt = [self responseExcerptFromData:data];
-			[self finishHistory:completion purchases:nil response:nil error:[self errorWithCode:WFSAppleIDDownloaderErrorInvalidResponse message:[NSString stringWithFormat:@"Apple returned an invalid response to the purchase history request (HTTP %ld, %@): %@", (long)response.statusCode, contentType, excerpt]]];
+			completion(nil, nil, [self errorWithCode:WFSAppleIDDownloaderErrorInvalidResponse message:[NSString stringWithFormat:@"Apple returned an invalid response to the purchase history request (HTTP %ld, %@): %@", (long)response.statusCode, contentType, excerpt]]);
 			return;
 		}
-		NSString* failureType = [self stringForKey:@"failureType" in:dict];
-		if (failureType.length)
+		if ([json[@"dialog"] isKindOfClass:[NSDictionary class]])
 		{
-			[self writeDebugLog:[NSString stringWithFormat:@"volumeStoreDownloadHistory(page=%ld) failureType=%@", (long)pageNumber, failureType]];
+			NSString* kind = [self stringForKey:@"kind" in:json[@"dialog"]];
+			completion(nil, nil, [self errorWithCode:WFSAppleIDDownloaderErrorAuthenticationFailed message:[NSString stringWithFormat:@"Apple's purchases endpoint requires account sign-in (dialog: %@).", kind.length ? kind : @"authorization"]]);
+			return;
 		}
-		NSArray* songList = dict[@"songList"];
-		NSMutableArray* purchases = [NSMutableArray array];
-		if ([songList isKindOfClass:[NSArray class]])
+		NSDictionary* apps = json[@"Apps"];
+		NSMutableArray* appIds = [NSMutableArray array];
+		if ([apps isKindOfClass:[NSDictionary class]])
 		{
-			for (id entry in songList)
+			NSArray* sortedKeys = [apps.allKeys sortedArrayUsingSelector:@selector(compare:)];
+			for (NSString* appId in sortedKeys)
 			{
-				NSDictionary* purchase = [self purchaseFromHistoryEntry:entry];
-				if (purchase)
+				if (appId.length)
 				{
-					[purchases addObject:purchase];
+					[appIds addObject:appId];
 				}
 			}
 		}
-		[self writeDebugLog:[NSString stringWithFormat:@"volumeStoreDownloadHistory(page=%ld) -> %lu purchase(s) parsed", (long)pageNumber, (unsigned long)purchases.count]];
-		[self finishHistory:completion purchases:purchases response:dict error:nil];
+		[self writeDebugLog:[NSString stringWithFormat:@"purchases(lockerData, restoreMode=%@) -> %lu app(s)", restoreMode, (unsigned long)appIds.count]];
+		completion(appIds, json, nil);
 	}];
 }
 
-- (void)getAllPurchaseHistoryWithCompletion:(void (^)(NSArray* purchases, NSDictionary* firstResponse, NSError* error))completion
+- (void)fetchContentDataForAppIds:(NSArray*)appIds index:(NSUInteger)index purchases:(NSMutableArray*)purchases firstResponse:(NSDictionary*)firstResponse completion:(void (^)(NSArray* purchases, NSDictionary* firstResponse, NSError* error))completion
 {
-	[self fetchPurchaseHistoryPage:1 firstResponse:nil purchases:[NSMutableArray array] stopAdamId:nil completion:completion];
-}
-
-- (void)fetchPurchaseHistoryPage:(NSInteger)pageNumber firstResponse:(NSDictionary*)firstResponse purchases:(NSMutableArray*)purchases stopAdamId:(NSString*)stopAdamId completion:(void (^)(NSArray* purchases, NSDictionary* firstResponse, NSError* error))completion
-{
-	__block NSDictionary* mutableFirstResponse = firstResponse;
-	__block NSString* mutableStopAdamId = stopAdamId;
-	[self getPurchaseHistoryForPage:pageNumber completion:^(NSArray* pagePurchases, NSDictionary* response, NSError* error)
+	if (index >= appIds.count)
+	{
+		[self finishHistory:completion purchases:purchases response:firstResponse error:nil];
+		return;
+	}
+	NSUInteger chunkSize = 50;
+	NSUInteger count = MIN(chunkSize, appIds.count - index);
+	NSArray* chunk = [appIds subarrayWithRange:NSMakeRange(index, count)];
+	NSString* contentIds = [chunk componentsJoinedByString:@","];
+	NSString* storeFrontId = [self storeFrontIdForPurchases];
+	NSString* urlString = [NSString stringWithFormat:@"https://se.itunes.apple.com/WebObjects/MZStoreElements.woa/wa/purchases?s=%@", storeFrontId];
+	NSDictionary* params = @{
+		@"action": @"POST",
+		@"contentIds": contentIds,
+		@"pillId": @"0",
+		@"mt": @"8",
+		@"sortValue": @"0",
+		@"vt": @"contentData",
+		@"restoreMode": @"undefined",
+	};
+	[self postForm:params toURL:[NSURL URLWithString:urlString] authenticated:YES completion:^(NSData* data, NSHTTPURLResponse* response, NSError* error)
 	{
 		if (error)
 		{
-			completion(purchases, mutableFirstResponse, error);
+			[self finishHistory:completion purchases:purchases response:firstResponse error:[self networkError:error]];
 			return;
 		}
-		if (!mutableFirstResponse)
+		[self writeDebugLog:[NSString stringWithFormat:@"purchases(contentData, %lu ids) -> HTTP %ld (%lu bytes)", (unsigned long)count, (long)response.statusCode, (unsigned long)data.length]];
+		[self writeRawResponseData:data label:@"history"];
+		if (response.statusCode == 429)
 		{
-			mutableFirstResponse = response;
+			[self finishHistory:completion purchases:purchases response:firstResponse error:[self errorWithCode:WFSAppleIDDownloaderErrorRateLimited message:@"Apple is rate limiting requests. Wait a few minutes and try again."]];
+			return;
 		}
-		NSMutableArray* merged = [NSMutableArray arrayWithArray:purchases];
-		[merged addObjectsFromArray:pagePurchases];
+		NSDictionary* json = [self parseJSONResponse:data];
+		if (!json)
+		{
+			NSString* contentType = response.allHeaderFields[@"Content-Type"];
+			if (![contentType isKindOfClass:[NSString class]])
+			{
+				contentType = @"?";
+			}
+			NSString* excerpt = [self responseExcerptFromData:data];
+			[self finishHistory:completion purchases:purchases response:firstResponse error:[self errorWithCode:WFSAppleIDDownloaderErrorInvalidResponse message:[NSString stringWithFormat:@"Apple returned an invalid response for purchase metadata (HTTP %ld, %@): %@", (long)response.statusCode, contentType, excerpt]]];
+			return;
+		}
+		NSDictionary* apps = json[@"Apps"];
+		NSUInteger resolved = 0;
+		if ([apps isKindOfClass:[NSDictionary class]])
+		{
+			for (NSString* appId in chunk)
+			{
+				NSDictionary* meta = apps[appId];
+				NSMutableDictionary* purchase = [NSMutableDictionary dictionary];
+				purchase[@"adamId"] = appId;
+				if ([meta isKindOfClass:[NSDictionary class]])
+				{
+					resolved++;
+					NSString* title = [self stringForKey:@"name" in:meta];
+					if (!title.length)
+					{
+						title = [self stringForKey:@"displayName" in:meta];
+					}
+					if (title.length)
+					{
+						purchase[@"title"] = title;
+					}
+					NSString* bundleId = [self stringForKey:@"bundleId" in:meta];
+					if (bundleId.length)
+					{
+						purchase[@"bundleId"] = bundleId;
+					}
+					NSString* purchaseDate = [self stringForKey:@"purchaseDate" in:meta];
+					if (purchaseDate.length)
+					{
+						purchase[@"purchaseDate"] = purchaseDate;
+					}
+					purchase[@"metadata"] = meta;
+				}
+				[purchases addObject:purchase];
+			}
+		}
+		[self writeDebugLog:[NSString stringWithFormat:@"purchases(contentData) -> %lu/%lu resolved", (unsigned long)resolved, (unsigned long)count]];
 		if (self.historyProgressHandler)
 		{
-			self.historyProgressHandler(pageNumber, (NSInteger)pagePurchases.count, (NSInteger)merged.count);
-		}
-		if (!pagePurchases.count || pageNumber >= 50)
-		{
-			completion(merged, mutableFirstResponse, nil);
-			return;
-		}
-		NSString* firstAdamId = [self stringForKey:@"adamId" in:pagePurchases.firstObject];
-		if (mutableStopAdamId.length && firstAdamId.length && [firstAdamId isEqualToString:mutableStopAdamId])
-		{
-			completion(merged, mutableFirstResponse, nil);
-			return;
-		}
-		if (!mutableStopAdamId)
-		{
-			mutableStopAdamId = firstAdamId;
+			self.historyProgressHandler((NSInteger)index, (NSInteger)count, (NSInteger)purchases.count);
 		}
 		dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.4 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^
 		{
-			[self fetchPurchaseHistoryPage:pageNumber + 1 firstResponse:mutableFirstResponse purchases:merged stopAdamId:mutableStopAdamId completion:completion];
+			[self fetchContentDataForAppIds:appIds index:index + count purchases:purchases firstResponse:firstResponse completion:completion];
 		});
 	}];
+}
+
+- (NSString*)storeFrontIdForPurchases
+{
+	if (self.storeFront.length)
+	{
+		NSArray* components = [self.storeFront componentsSeparatedByString:@"-"];
+		if (components.count && [components[0] length])
+		{
+			return components[0];
+		}
+	}
+	return @"143441";
 }
 
 - (void)finishHistory:(WFSAppleIDHistoryCompletion)completion purchases:(NSArray*)purchases response:(NSDictionary*)response error:(NSError*)error
@@ -1176,6 +1257,80 @@ static const NSInteger kWFSMaxAuthAttempts = 100;
 }
 
 #pragma mark - Response parsing
+
+- (void)postForm:(NSDictionary*)params toURL:(NSURL*)url authenticated:(BOOL)authenticated completion:(void (^)(NSData* data, NSHTTPURLResponse* response, NSError* error))completion
+{
+	NSString* bodyString = [self formEncodedStringFromDictionary:params];
+	NSData* bodyData = [bodyString dataUsingEncoding:NSUTF8StringEncoding];
+	NSMutableURLRequest* request = [NSMutableURLRequest requestWithURL:url];
+	request.HTTPMethod = @"POST";
+	[request setValue:kWFSConfiguratorUA forHTTPHeaderField:@"User-Agent"];
+	[request setValue:@"application/x-www-form-urlencoded" forHTTPHeaderField:@"Content-Type"];
+	[request setValue:@"*/*" forHTTPHeaderField:@"Accept"];
+	if (authenticated)
+	{
+		if (self.dsid.length)
+		{
+			[request setValue:self.dsid forHTTPHeaderField:@"X-Dsid"];
+			[request setValue:self.dsid forHTTPHeaderField:@"iCloud-Dsid"];
+		}
+		if (self.token.length)
+		{
+			[request setValue:self.token forHTTPHeaderField:@"X-Token"];
+		}
+		if (self.storeFront.length)
+		{
+			[request setValue:self.storeFront forHTTPHeaderField:@"X-Apple-Store-Front"];
+		}
+	}
+	request.HTTPBody = bodyData;
+	[[self.session dataTaskWithRequest:request completionHandler:^(NSData* data, NSURLResponse* response, NSError* error)
+	{
+		completion(data, (NSHTTPURLResponse*)response, error);
+	}] resume];
+}
+
+- (NSString*)formEncodedStringFromDictionary:(NSDictionary*)dict
+{
+	NSMutableArray* parts = [NSMutableArray array];
+	for (NSString* key in dict)
+	{
+		if (![key isKindOfClass:[NSString class]] || !key.length)
+		{
+			continue;
+		}
+		id value = dict[key];
+		if ([value isKindOfClass:[NSString class]])
+		{
+			[parts addObject:[NSString stringWithFormat:@"%@=%@", [self percentEncode:key], [self percentEncode:(NSString*)value]]];
+		}
+		else if ([value isKindOfClass:[NSNumber class]])
+		{
+			[parts addObject:[NSString stringWithFormat:@"%@=%@", [self percentEncode:key], [self percentEncode:[value stringValue]]]];
+		}
+	}
+	return [parts componentsJoinedByString:@"&"];
+}
+
+- (NSString*)percentEncode:(NSString*)string
+{
+	return [string stringByAddingPercentEncodingWithAllowedCharacters:[NSCharacterSet URLQueryAllowedCharacterSet]];
+}
+
+- (NSDictionary*)parseJSONResponse:(NSData*)data
+{
+	if (!data.length)
+	{
+		return nil;
+	}
+	NSError* error = nil;
+	id obj = [NSJSONSerialization JSONObjectWithData:data options:0 error:&error];
+	if (!error && [obj isKindOfClass:[NSDictionary class]])
+	{
+		return obj;
+	}
+	return nil;
+}
 
 - (void)postPlist:(NSDictionary*)body toURL:(NSURL*)url contentType:(NSString*)contentType authenticated:(BOOL)authenticated completion:(void (^)(NSData* data, NSHTTPURLResponse* response, NSError* error))completion
 {

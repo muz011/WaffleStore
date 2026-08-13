@@ -112,14 +112,14 @@
 	[self appendLog:@"---"];
 	[self setStatus:@"Fetching purchase history…"];
 	__weak typeof(self) weakSelf = self;
-	downloader.historyProgressHandler = ^(NSInteger pageNumber, NSInteger pagePurchaseCount, NSInteger totalPurchases)
+	downloader.historyProgressHandler = ^(NSInteger chunkNumber, NSInteger chunkCount, NSInteger totalPurchases)
 	{
 		__strong typeof(self) self = weakSelf;
 		if (!self)
 		{
 			return;
 		}
-		[self appendLog:[NSString stringWithFormat:@"page %ld -> %ld purchase(s), total %ld", (long)pageNumber, (long)pagePurchaseCount, (long)totalPurchases]];
+		[self appendLog:[NSString stringWithFormat:@"chunk %ld -> %ld metadata app(s), total %ld", (long)chunkNumber, (long)chunkCount, (long)totalPurchases]];
 	};
 	[downloader getAllPurchaseHistoryWithCompletion:^(NSArray* purchases, NSDictionary* firstResponse, NSError* error)
 	{
@@ -173,13 +173,9 @@
 			NSString* purchaseDate = purchase[@"purchaseDate"];
 			NSString* marker = @"";
 			NSDictionary* metadata = purchase[@"metadata"];
-			if ([metadata isKindOfClass:[NSDictionary class]])
+			if (![metadata isKindOfClass:[NSDictionary class]])
 			{
-				id versionIds = metadata[@"softwareVersionExternalIdentifiers"];
-				if (![versionIds isKindOfClass:[NSArray class]] || [versionIds count] == 0)
-				{
-					marker = @" [no version ids - possibly deleted/removed]";
-				}
+				marker = @" [no metadata - possibly deleted/removed]";
 			}
 			[self appendLog:[NSString stringWithFormat:@"%lu. %@ #%@ %@ %@%@", (unsigned long)(i + 1), title ?: @"(untitled)", adamId ?: @"?", bundleId ?: @"?", purchaseDate ?: @"?", marker]];
 		}

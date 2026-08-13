@@ -53,7 +53,6 @@ typedef void (^WFSAppleIDHistoryProgressHandler)(NSInteger pageNumber, NSInteger
 - (void)getDownloadInfoForAdamId:(long long)adamId versionId:(long long)versionId autoPurchase:(BOOL)autoPurchase completion:(WFSAppleIDDownloadInfoCompletion)completion;
 - (void)getExternalVersionIdsForAdamId:(long long)adamId completion:(WFSAppleIDVersionsInfoCompletion)completion;
 - (void)searchPurchaseHistoryForBundleID:(NSString*)bundleID completion:(WFSAppleIDPurchaseSearchCompletion)completion;
-- (void)getPurchaseHistoryForPage:(NSInteger)pageNumber completion:(WFSAppleIDHistoryCompletion)completion;
 - (void)getAllPurchaseHistoryWithCompletion:(void (^)(NSArray* _Nullable purchases, NSDictionary* _Nullable firstResponse, NSError* _Nullable error))completion;
 
 @end
