@@ -482,7 +482,7 @@ static const NSInteger kWFSMaxAuthAttempts = 100;
 	}
 	NSString* urlString = [NSString stringWithFormat:@"https://%@/WebObjects/MZFinance.woa/wa/volumeStoreDownloadHistory?guid=%@%@", [self buyHost], self.guid, pageQuery];
 	self.lastDownloadEndpoint = urlString;
-	[self postPlist:body toURL:[NSURL URLWithString:urlString] contentType:@"application/x-apple-plist" authenticated:YES tokenHeaders:NO completion:^(NSData* data, NSHTTPURLResponse* response, NSError* error)
+	[self postPlist:body toURL:[NSURL URLWithString:urlString] contentType:@"application/x-apple-plist" authenticated:YES completion:^(NSData* data, NSHTTPURLResponse* response, NSError* error)
 	{
 		if (error)
 		{
@@ -499,7 +499,13 @@ static const NSInteger kWFSMaxAuthAttempts = 100;
 		NSDictionary* dict = [self parsePlistResponse:data];
 		if (!dict)
 		{
-			[self finishHistory:completion purchases:nil response:nil error:[self errorWithCode:WFSAppleIDDownloaderErrorInvalidResponse message:@"Apple returned an invalid response to the purchase history request."]];
+			NSString* contentType = response.allHeaderFields[@"Content-Type"];
+			if (![contentType isKindOfClass:[NSString class]])
+			{
+				contentType = @"?";
+			}
+			NSString* excerpt = [self responseExcerptFromData:data];
+			[self finishHistory:completion purchases:nil response:nil error:[self errorWithCode:WFSAppleIDDownloaderErrorInvalidResponse message:[NSString stringWithFormat:@"Apple returned an invalid response to the purchase history request (HTTP %ld, %@): %@", (long)response.statusCode, contentType, excerpt]]];
 			return;
 		}
 		NSString* failureType = [self stringForKey:@"failureType" in:dict];
@@ -1224,6 +1230,34 @@ static const NSInteger kWFSMaxAuthAttempts = 100;
 	{
 		completion(data, (NSHTTPURLResponse*)response, error);
 	}] resume];
+}
+
+- (NSString*)responseExcerptFromData:(NSData*)data
+{
+	if (!data.length)
+	{
+		return @"(empty body)";
+	}
+	NSString* text = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
+	if (text.length)
+	{
+		NSUInteger limit = 400;
+		if (text.length > limit)
+		{
+			text = [[text substringToIndex:limit] stringByAppendingString:@"…"];
+		}
+		text = [text stringByReplacingOccurrencesOfString:@"\n" withString:@" "];
+		text = [text stringByReplacingOccurrencesOfString:@"\r" withString:@" "];
+		return text;
+	}
+	const unsigned char* bytes = data.bytes;
+	NSUInteger limit = MIN((NSUInteger)80, data.length);
+	NSMutableString* hex = [NSMutableString stringWithCapacity:limit * 2];
+	for (NSUInteger i = 0; i < limit; i++)
+	{
+		[hex appendFormat:@"%02x", bytes[i]];
+	}
+	return [NSString stringWithFormat:@"(non-text body, %lu bytes) %@", (unsigned long)data.length, hex];
 }
 
 - (NSDictionary*)parsePlistResponse:(NSData*)data
