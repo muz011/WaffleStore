@@ -25,7 +25,9 @@ typedef void (^WFSAppleIDVersionsCompletion)(NSArray* _Nullable versions, NSDict
 typedef void (^WFSAppleIDDownloadInfoCompletion)(NSURL* _Nullable ipaURL, NSDictionary* _Nullable metadata, NSError* _Nullable error);
 typedef void (^WFSAppleIDPurchaseSearchCompletion)(NSDictionary* _Nullable purchase, NSError* _Nullable error);
 typedef void (^WFSAppleIDVersionsInfoCompletion)(NSArray* _Nullable externalVersionIds, NSDictionary* _Nullable metadata, NSError* _Nullable error);
+typedef void (^WFSAppleIDHistoryCompletion)(NSArray* _Nullable purchases, NSDictionary* _Nullable response, NSError* _Nullable error);
 typedef void (^WFSAppleIDAuthProgressHandler)(NSUInteger attempt, NSUInteger totalAttempts);
+typedef void (^WFSAppleIDHistoryProgressHandler)(NSInteger pageNumber, NSInteger pagePurchaseCount, NSInteger totalPurchases);
 
 @interface WFSAppleIDDownloader : NSObject
 
@@ -39,6 +41,7 @@ typedef void (^WFSAppleIDAuthProgressHandler)(NSUInteger attempt, NSUInteger tot
 @property (nonatomic, copy, readonly, nullable) NSString* lastDownloadEndpoint;
 @property (nonatomic, readonly) BOOL anisetteAvailable;
 @property (nonatomic, copy, nullable) WFSAppleIDAuthProgressHandler authProgressHandler;
+@property (nonatomic, copy, nullable) WFSAppleIDHistoryProgressHandler historyProgressHandler;
 
 - (void)authenticateWithAppleId:(NSString*)appleId password:(NSString*)password completion:(WFSAppleIDAuthCompletion)completion;
 - (void)retryWithTwoFactorCode:(NSString*)code completion:(WFSAppleIDAuthCompletion)completion;
@@ -50,6 +53,8 @@ typedef void (^WFSAppleIDAuthProgressHandler)(NSUInteger attempt, NSUInteger tot
 - (void)getDownloadInfoForAdamId:(long long)adamId versionId:(long long)versionId autoPurchase:(BOOL)autoPurchase completion:(WFSAppleIDDownloadInfoCompletion)completion;
 - (void)getExternalVersionIdsForAdamId:(long long)adamId completion:(WFSAppleIDVersionsInfoCompletion)completion;
 - (void)searchPurchaseHistoryForBundleID:(NSString*)bundleID completion:(WFSAppleIDPurchaseSearchCompletion)completion;
+- (void)getPurchaseHistoryForPage:(NSInteger)pageNumber completion:(WFSAppleIDHistoryCompletion)completion;
+- (void)getAllPurchaseHistoryWithCompletion:(void (^)(NSArray* _Nullable purchases, NSDictionary* _Nullable firstResponse, NSError* _Nullable error))completion;
 
 @end
 

@@ -464,6 +464,121 @@ static const NSInteger kWFSMaxAuthAttempts = 100;
 	}];
 }
 
+- (void)getPurchaseHistoryForPage:(NSInteger)pageNumber completion:(WFSAppleIDHistoryCompletion)completion
+{
+	if (!self.authenticated)
+	{
+		[self finishHistory:completion purchases:nil response:nil error:[self errorWithCode:WFSAppleIDDownloaderErrorNotAuthenticated message:@"Not signed in to Apple ID. Use the authTest tab to sign in first."]];
+		return;
+	}
+	NSDictionary* body = @{
+		@"guid": self.guid,
+		@"creditDisplay": @"",
+	};
+	NSString* pageQuery = @"";
+	if (pageNumber >= 0)
+	{
+		pageQuery = [NSString stringWithFormat:@"&pageNumber=%ld", (long)pageNumber];
+	}
+	NSString* urlString = [NSString stringWithFormat:@"https://%@/WebObjects/MZFinance.woa/wa/volumeStoreDownloadHistory?guid=%@%@", [self buyHost], self.guid, pageQuery];
+	self.lastDownloadEndpoint = urlString;
+	[self postPlist:body toURL:[NSURL URLWithString:urlString] contentType:@"application/x-apple-plist" authenticated:YES tokenHeaders:NO completion:^(NSData* data, NSHTTPURLResponse* response, NSError* error)
+	{
+		if (error)
+		{
+			[self finishHistory:completion purchases:nil response:nil error:[self networkError:error]];
+			return;
+		}
+		[self writeDebugLog:[NSString stringWithFormat:@"volumeStoreDownloadHistory(page=%ld) -> HTTP %ld (%lu bytes)", (long)pageNumber, (long)response.statusCode, (unsigned long)data.length]];
+		[self writeRawResponseData:data label:@"history"];
+		if (response.statusCode == 429)
+		{
+			[self finishHistory:completion purchases:nil response:nil error:[self errorWithCode:WFSAppleIDDownloaderErrorRateLimited message:@"Apple is rate limiting requests. Wait a few minutes and try again."]];
+			return;
+		}
+		NSDictionary* dict = [self parsePlistResponse:data];
+		if (!dict)
+		{
+			[self finishHistory:completion purchases:nil response:nil error:[self errorWithCode:WFSAppleIDDownloaderErrorInvalidResponse message:@"Apple returned an invalid response to the purchase history request."]];
+			return;
+		}
+		NSString* failureType = [self stringForKey:@"failureType" in:dict];
+		if (failureType.length)
+		{
+			[self writeDebugLog:[NSString stringWithFormat:@"volumeStoreDownloadHistory(page=%ld) failureType=%@", (long)pageNumber, failureType]];
+		}
+		NSArray* songList = dict[@"songList"];
+		NSMutableArray* purchases = [NSMutableArray array];
+		if ([songList isKindOfClass:[NSArray class]])
+		{
+			for (id entry in songList)
+			{
+				NSDictionary* purchase = [self purchaseFromHistoryEntry:entry];
+				if (purchase)
+				{
+					[purchases addObject:purchase];
+				}
+			}
+		}
+		[self writeDebugLog:[NSString stringWithFormat:@"volumeStoreDownloadHistory(page=%ld) -> %lu purchase(s) parsed", (long)pageNumber, (unsigned long)purchases.count]];
+		[self finishHistory:completion purchases:purchases response:dict error:nil];
+	}];
+}
+
+- (void)getAllPurchaseHistoryWithCompletion:(void (^)(NSArray* purchases, NSDictionary* firstResponse, NSError* error))completion
+{
+	[self fetchPurchaseHistoryPage:0 firstResponse:nil purchases:[NSMutableArray array] stopAdamId:nil completion:completion];
+}
+
+- (void)fetchPurchaseHistoryPage:(NSInteger)pageNumber firstResponse:(NSDictionary*)firstResponse purchases:(NSMutableArray*)purchases stopAdamId:(NSString*)stopAdamId completion:(void (^)(NSArray* purchases, NSDictionary* firstResponse, NSError* error))completion
+{
+	[self getPurchaseHistoryForPage:pageNumber completion:^(NSArray* pagePurchases, NSDictionary* response, NSError* error)
+	{
+		if (error)
+		{
+			completion(purchases, firstResponse, error);
+			return;
+		}
+		if (!firstResponse)
+		{
+			firstResponse = response;
+		}
+		NSMutableArray* merged = [NSMutableArray arrayWithArray:purchases];
+		[merged addObjectsFromArray:pagePurchases];
+		if (self.historyProgressHandler)
+		{
+			self.historyProgressHandler(pageNumber, (NSInteger)pagePurchases.count, (NSInteger)merged.count);
+		}
+		if (!pagePurchases.count || pageNumber >= 49)
+		{
+			completion(merged, firstResponse, nil);
+			return;
+		}
+		NSString* firstAdamId = [self stringForKey:@"adamId" in:pagePurchases.firstObject];
+		if (stopAdamId.length && firstAdamId.length && [firstAdamId isEqualToString:stopAdamId])
+		{
+			completion(merged, firstResponse, nil);
+			return;
+		}
+		if (!stopAdamId)
+		{
+			stopAdamId = firstAdamId;
+		}
+		dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.4 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^
+		{
+			[self fetchPurchaseHistoryPage:pageNumber + 1 firstResponse:firstResponse purchases:merged stopAdamId:stopAdamId completion:completion];
+		});
+	}];
+}
+
+- (void)finishHistory:(WFSAppleIDHistoryCompletion)completion purchases:(NSArray*)purchases response:(NSDictionary*)response error:(NSError*)error
+{
+	dispatch_async(dispatch_get_main_queue(), ^
+	{
+		completion(purchases, response, error);
+	});
+}
+
 - (NSDictionary*)purchaseFromHistoryEntry:(id)entry
 {
 	if (![entry isKindOfClass:[NSDictionary class]])
