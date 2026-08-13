@@ -50,6 +50,10 @@ static NSString* const kWFSDownloadTestUA = @"Configurator/2.17 (Macintosh; OS X
 	_statusLabel.textColor = [UIColor secondaryLabelColor];
 	_statusLabel.text = @"Ready.";
 
+	UITapGestureRecognizer* tapGesture = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(dismissKeyboard)];
+	tapGesture.cancelsTouchesInView = NO;
+	[self.view addGestureRecognizer:tapGesture];
+
 	_logView = [[UITextView alloc] init];
 	_logView.editable = NO;
 	_logView.selectable = YES;
@@ -78,7 +82,22 @@ static NSString* const kWFSDownloadTestUA = @"Configurator/2.17 (Macintosh; OS X
 	field.keyboardType = UIKeyboardTypeNumberPad;
 	field.autocorrectionType = UITextAutocorrectionTypeNo;
 	field.clearButtonMode = UITextFieldViewModeWhileEditing;
+	field.inputAccessoryView = [self keyboardDoneToolbar];
 	return field;
+}
+
+- (UIToolbar*)keyboardDoneToolbar
+{
+	UIToolbar* toolbar = [[UIToolbar alloc] initWithFrame:CGRectMake(0, 0, 320, 44)];
+	UIBarButtonItem* flexible = [[UIBarButtonItem alloc] initWithBarButtonSystemItem:UIBarButtonSystemItemFlexibleSpace target:nil action:nil];
+	UIBarButtonItem* done = [[UIBarButtonItem alloc] initWithBarButtonSystemItem:UIBarButtonSystemItemDone target:self action:@selector(dismissKeyboard)];
+	toolbar.items = @[flexible, done];
+	return toolbar;
+}
+
+- (void)dismissKeyboard
+{
+	[self.view endEditing:YES];
 }
 
 - (void)setupConstraintsForRow:(UIStackView*)autoPurchaseRow
