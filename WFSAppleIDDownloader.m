@@ -7,6 +7,7 @@ static NSString* const kWFSConfiguratorUA = @"Configurator/2.17 (Macintosh; OS X
 static NSString* const kWFSFastAuthEndpoint = @"https://auth.itunes.apple.com/auth/v1/native/fast/";
 static NSString* const kWFSLegacyAuthEndpoint = @"https://buy.itunes.apple.com/WebObjects/MZFinance.woa/wa/authenticate";
 static NSString* const kWFSInitBagEndpoint = @"https://init.itunes.apple.com/bag.xml?guid=%@";
+static NSString* const kWFSAnisetteEndpoint = @"https://ani.sidestore.io/";
 static NSString* const kWFSBuyHost = @"buy.itunes.apple.com";
 
 static NSString* const kWFSFailureTypeInvalidCredentials = @"-5000";
@@ -52,6 +53,7 @@ static const NSInteger kWFSMaxAuthAttempts = 100;
 @property (nonatomic, assign) BOOL cancelRequested;
 @property (nonatomic, assign) BOOL twoFactorCodeSent;
 @property (nonatomic, copy, readwrite) NSString* authenticatedAppleId;
+@property (nonatomic, copy) NSDictionary* anisetteHeaders;
 @end
 
 @implementation WFSAppleIDDownloader
@@ -342,26 +344,74 @@ static const NSInteger kWFSMaxAuthAttempts = 100;
 - (void)tryAuthenticateWithAttempt:(NSInteger)attempt completion:(WFSAppleIDAuthCompletion)completion
 {
 	NSMutableArray* diagnostics = [NSMutableArray array];
-	[self resolveFastAuthEndpoint:^(NSString* resolvedEndpoint)
+	[self fetchAnisetteHeadersWithCompletion:^(NSDictionary* anisetteHeaders)
 	{
-		if (resolvedEndpoint.length)
+		self.anisetteHeaders = anisetteHeaders;
+		if (anisetteHeaders.count)
 		{
-			[diagnostics addObject:[NSString stringWithFormat:@"bag.xml -> %@", resolvedEndpoint]];
+			[diagnostics addObject:@"ani.sidestore.io -> anisette headers received"];
 		}
 		else
 		{
-			[diagnostics addObject:@"bag.xml: no authenticateAccount key, using built-in endpoints"];
+			[diagnostics addObject:@"ani.sidestore.io: anisette unavailable, continuing without"];
 		}
-		NSMutableArray* candidates = [NSMutableArray array];
-		if (resolvedEndpoint.length)
+		[self resolveFastAuthEndpoint:^(NSString* resolvedEndpoint)
 		{
-			[candidates addObject:resolvedEndpoint];
-		}
-		[candidates addObject:kWFSFastAuthEndpoint];
-		[candidates addObject:[NSString stringWithFormat:@"%@?guid=%@", kWFSLegacyAuthEndpoint, self.guid]];
-		[candidates addObject:kWFSLegacyAuthEndpoint];
-		[self tryAuthEndpointCandidates:candidates index:0 attempt:attempt retryCount:0 diagnostics:diagnostics completion:completion];
+			if (resolvedEndpoint.length)
+			{
+				[diagnostics addObject:[NSString stringWithFormat:@"bag.xml -> %@", resolvedEndpoint]];
+			}
+			else
+			{
+				[diagnostics addObject:@"bag.xml: no authenticateAccount key, using built-in endpoints"];
+			}
+			NSMutableArray* candidates = [NSMutableArray array];
+			[candidates addObject:kWFSLegacyAuthEndpoint];
+			if (resolvedEndpoint.length)
+			{
+				[candidates addObject:resolvedEndpoint];
+			}
+			[candidates addObject:kWFSFastAuthEndpoint];
+			[self tryAuthEndpointCandidates:candidates index:0 attempt:attempt retryCount:0 diagnostics:diagnostics completion:completion];
+		}];
 	}];
+}
+
+- (void)fetchAnisetteHeadersWithCompletion:(void (^)(NSDictionary* headers))completion
+{
+	NSMutableURLRequest* request = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:kWFSAnisetteEndpoint]];
+	request.HTTPMethod = @"GET";
+	[request setValue:@"application/json" forHTTPHeaderField:@"Accept"];
+	[request setTimeoutInterval:15];
+	[[self.session dataTaskWithRequest:request completionHandler:^(NSData* data, NSURLResponse* response, NSError* error)
+	{
+		if (error || !data.length)
+		{
+			completion(nil);
+			return;
+		}
+		if (((NSHTTPURLResponse*)response).statusCode != 200)
+		{
+			completion(nil);
+			return;
+		}
+		id obj = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
+		if (![obj isKindOfClass:[NSDictionary class]])
+		{
+			completion(nil);
+			return;
+		}
+		NSMutableDictionary* headers = [NSMutableDictionary dictionary];
+		for (NSString* key in (NSDictionary*)obj)
+		{
+			id value = ((NSDictionary*)obj)[key];
+			if ([value isKindOfClass:[NSString class]] && ((NSString*)value).length)
+			{
+				headers[key] = value;
+			}
+		}
+		completion(headers);
+	}] resume];
 }
 
 - (void)resolveFastAuthEndpoint:(void (^)(NSString* endpoint))completion
@@ -447,7 +497,7 @@ static const NSInteger kWFSMaxAuthAttempts = 100;
 
 - (void)postAuthBody:(NSDictionary*)body toURLString:(NSString*)urlString attempt:(NSInteger)attempt retryCount:(NSInteger)retryCount redirects:(NSInteger)redirects candidates:(NSArray*)candidates index:(NSUInteger)index diagnostics:(NSMutableArray*)diagnostics completion:(WFSAppleIDAuthCompletion)completion
 {
-	[self postPlist:body toURL:[NSURL URLWithString:urlString] contentType:@"application/x-www-form-urlencoded" authenticated:NO completion:^(NSData* data, NSHTTPURLResponse* response, NSError* error)
+	[self postPlist:body toURL:[NSURL URLWithString:urlString] contentType:@"application/x-www-form-urlencoded" authenticated:NO tokenHeaders:NO additionalHeaders:self.anisetteHeaders completion:^(NSData* data, NSHTTPURLResponse* response, NSError* error)
 	{
 		if (error)
 		{
@@ -813,10 +863,15 @@ static const NSInteger kWFSMaxAuthAttempts = 100;
 
 - (void)postPlist:(NSDictionary*)body toURL:(NSURL*)url contentType:(NSString*)contentType authenticated:(BOOL)authenticated completion:(void (^)(NSData* data, NSHTTPURLResponse* response, NSError* error))completion
 {
-	[self postPlist:body toURL:url contentType:contentType authenticated:authenticated tokenHeaders:authenticated completion:completion];
+	[self postPlist:body toURL:url contentType:contentType authenticated:authenticated tokenHeaders:authenticated additionalHeaders:nil completion:completion];
 }
 
 - (void)postPlist:(NSDictionary*)body toURL:(NSURL*)url contentType:(NSString*)contentType authenticated:(BOOL)authenticated tokenHeaders:(BOOL)tokenHeaders completion:(void (^)(NSData* data, NSHTTPURLResponse* response, NSError* error))completion
+{
+	[self postPlist:body toURL:url contentType:contentType authenticated:authenticated tokenHeaders:tokenHeaders additionalHeaders:nil completion:completion];
+}
+
+- (void)postPlist:(NSDictionary*)body toURL:(NSURL*)url contentType:(NSString*)contentType authenticated:(BOOL)authenticated tokenHeaders:(BOOL)tokenHeaders additionalHeaders:(NSDictionary*)additionalHeaders completion:(void (^)(NSData* data, NSHTTPURLResponse* response, NSError* error))completion
 {
 	NSError* serializationError = nil;
 	NSData* bodyData = [NSPropertyListSerialization dataWithPropertyList:body format:NSPropertyListXMLFormat_v1_0 options:0 error:&serializationError];
@@ -850,6 +905,14 @@ static const NSInteger kWFSMaxAuthAttempts = 100;
 			{
 				[request setValue:self.storeFront forHTTPHeaderField:@"X-Apple-Store-Front"];
 			}
+		}
+	}
+	for (NSString* key in additionalHeaders)
+	{
+		NSString* value = additionalHeaders[key];
+		if ([key isKindOfClass:[NSString class]] && [value isKindOfClass:[NSString class]] && key.length && value.length)
+		{
+			[request setValue:value forHTTPHeaderField:key];
 		}
 	}
 	request.HTTPBody = bodyData;
@@ -1067,6 +1130,7 @@ static const NSInteger kWFSMaxAuthAttempts = 100;
 	self.storeFront = nil;
 	self.pod = nil;
 	self.twoFactorCodeSent = NO;
+	self.anisetteHeaders = nil;
 }
 
 - (void)finishVersions:(WFSAppleIDVersionsCompletion)completion versions:(NSArray*)versions metadata:(NSDictionary*)metadata error:(NSError*)error
