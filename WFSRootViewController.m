@@ -23,30 +23,7 @@ extern int posix_spawnattr_set_persona_np(const posix_spawnattr_t* __restrict at
 extern int posix_spawnattr_set_persona_uid_np(const posix_spawnattr_t* __restrict attrs, uid_t uid);
 extern int posix_spawnattr_set_persona_gid_np(const posix_spawnattr_t* __restrict attrs, gid_t gid);
 
-typedef int (*WFSPersonaGroupsFn)(const posix_spawnattr_t* __restrict attrs, gid_t* groups, int ngroups);
-typedef int (*WFSPersonaFlagsFn)(const posix_spawnattr_t* __restrict attrs, uint32_t flags);
-
-static WFSPersonaGroupsFn wfsPersonaGroupsFn(void)
-{
-	static WFSPersonaGroupsFn cached = NULL;
-	static dispatch_once_t onceToken;
-	dispatch_once(&onceToken, ^
-	{
-		cached = (WFSPersonaGroupsFn)dlsym(RTLD_DEFAULT, "posix_spawnattr_set_persona_groups_np");
-	});
-	return cached;
-}
-
-static WFSPersonaFlagsFn wfsPersonaFlagsFn(void)
-{
-	static WFSPersonaFlagsFn cached = NULL;
-	static dispatch_once_t onceToken;
-	dispatch_once(&onceToken, ^
-	{
-		cached = (WFSPersonaFlagsFn)dlsym(RTLD_DEFAULT, "posix_spawnattr_set_persona_flags_np");
-	});
-	return cached;
-}
+#define WFS_PERSONA_FLAGS_OVERRIDE 1
 
 typedef int (*WFSJBInitFn)(void);
 typedef int (*WFSJBClientCloseFn)(void);
@@ -224,17 +201,63 @@ static NSInteger WFSSpawnRootWithTimeout(NSArray* arguments, NSString* logFilePa
 	{
 		WFSJBInitFn jbInit = (WFSJBInitFn)dlsym(jbHandle, "jb_init");
 		WFSJBClientSpawnFn jbSpawn = (WFSJBClientSpawnFn)dlsym(jbHandle, "jb_client_spawn");
+		WFSJBClientCloseFn jbClose = (WFSJBClientCloseFn)dlsym(jbHandle, "jb_client_close");
 		if (jbInit && jbSpawn)
 		{
-			int initResult = jbInit();
-			if (initResult == 0)
+			__block int spawnResult = -1;
+			__block BOOL jbAttempted = NO;
+			dispatch_semaphore_t spawnSemaphore = dispatch_semaphore_create(0);
+			dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^
 			{
-				__block pid_t spawnedPid = -1;
-				int spawnResult = jbSpawn(0, 0, (int)allArguments.count, argv, ^(pid_t pid)
+				int initResult = jbInit();
+				if (initResult == 0)
 				{
-					spawnedPid = pid;
-				});
-				(void)spawnedPid;
+					jbAttempted = YES;
+					char** jbArgv = calloc(allArguments.count + 1, sizeof(char*));
+					if (jbArgv)
+					{
+						for (NSUInteger i = 0; i < allArguments.count; i++)
+						{
+							jbArgv[i] = strdup(argv[i]);
+						}
+						__block pid_t spawnedPid = -1;
+						spawnResult = jbSpawn(0, 0, (int)allArguments.count, jbArgv, ^(pid_t pid)
+						{
+							spawnedPid = pid;
+						});
+						(void)spawnedPid;
+						for (NSUInteger i = 0; i < allArguments.count; i++)
+						{
+							free(jbArgv[i]);
+						}
+						free(jbArgv);
+					}
+				}
+				else
+				{
+					spawnResult = initResult;
+				}
+				dispatch_semaphore_signal(spawnSemaphore);
+			});
+			NSTimeInterval jbStart = [NSProcessInfo processInfo].systemUptime;
+			BOOL jbTimedOut = (dispatch_semaphore_wait(spawnSemaphore, dispatch_time(DISPATCH_TIME_NOW, (int64_t)(30.0 * NSEC_PER_SEC))) != 0);
+			if (jbTimedOut)
+			{
+				if (outputHandler)
+				{
+					outputHandler(@"WFS_JB: jailbreakd call blocked beyond 30s; falling through to persona\n");
+				}
+				if (jbClose)
+				{
+					jbClose();
+				}
+			}
+			else
+			{
+				if (outputHandler)
+				{
+					outputHandler([NSString stringWithFormat:@"WFS_JB: init+spawn returned %d after %.1fs\n", spawnResult, [NSProcessInfo processInfo].systemUptime - jbStart]);
+				}
 				if (spawnResult == 0)
 				{
 					if (methodUsedOut)
@@ -280,16 +303,19 @@ static NSInteger WFSSpawnRootWithTimeout(NSArray* arguments, NSString* logFilePa
 					free(argv);
 					return resultCode;
 				}
-				if (spawnErrnoOut)
+				if (jbAttempted)
 				{
-					*spawnErrnoOut = spawnResult;
+					if (spawnErrnoOut)
+					{
+						*spawnErrnoOut = spawnResult;
+					}
+					if (methodUsedOut)
+					{
+						*methodUsedOut = @"jailbreakd(spawn-failed)";
+					}
+					free(argv);
+					return -200;
 				}
-				if (methodUsedOut)
-				{
-					*methodUsedOut = @"jailbreakd(spawn-failed)";
-				}
-				free(argv);
-				return -200;
 			}
 		}
 	}
@@ -297,21 +323,11 @@ static NSInteger WFSSpawnRootWithTimeout(NSArray* arguments, NSString* logFilePa
 	start = [NSProcessInfo processInfo].systemUptime;
 	posix_spawnattr_t attributes;
 	posix_spawnattr_init(&attributes);
-	posix_spawnattr_set_persona_np(&attributes, 99, 0);
+	posix_spawnattr_set_persona_np(&attributes, 99, WFS_PERSONA_FLAGS_OVERRIDE);
 	posix_spawnattr_set_persona_uid_np(&attributes, 0);
 	posix_spawnattr_set_persona_gid_np(&attributes, 0);
-	WFSPersonaGroupsFn groupsFn = wfsPersonaGroupsFn();
-	if (groupsFn)
-	{
-		groupsFn(&attributes, NULL, 0);
-	}
-	WFSPersonaFlagsFn flagsFn = wfsPersonaFlagsFn();
-	if (flagsFn)
-	{
-		flagsFn(&attributes, 0);
-	}
 	pid_t pid = 0;
-	int spawnResult = posix_spawn(&pid, argv[0], NULL, &attributes, argv, environ);
+	int spawnResult = posix_spawn(&pid, argv[0], NULL, &attributes, argv, NULL);
 	posix_spawnattr_destroy(&attributes);
 	if (spawnResult != 0)
 	{
