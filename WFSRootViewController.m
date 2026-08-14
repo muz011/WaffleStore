@@ -10,8 +10,14 @@
 #import <sys/types.h>
 #import <signal.h>
 #import <time.h>
+#import <unistd.h>
 
 extern char** environ;
+
+#define WFS_POSIX_SPAWN_PERSONA_FLAGS_OVERRIDE 1
+extern int posix_spawnattr_set_persona_np(const posix_spawnattr_t* __restrict attrs, uid_t persona_id, uint32_t flags);
+extern int posix_spawnattr_set_persona_uid_np(const posix_spawnattr_t* __restrict attrs, uid_t uid);
+extern int posix_spawnattr_set_persona_gid_np(const posix_spawnattr_t* __restrict attrs, gid_t gid);
 
 static BOOL WFSSpawnWithTimeout(NSArray* arguments, NSTimeInterval timeout, BOOL* cancelled)
 {
@@ -61,6 +67,132 @@ static BOOL WFSSpawnWithTimeout(NSArray* arguments, NSTimeInterval timeout, BOOL
 	}
 	free(argv);
 	return WIFEXITED(status) && WEXITSTATUS(status) == 0;
+}
+
+static NSInteger WFSSpawnRootWithTimeout(NSArray* arguments, NSTimeInterval timeout, BOOL* cancelled, NSString** output, void (^progressHandler)(NSString* message))
+{
+	NSMutableArray* allArguments = [NSMutableArray arrayWithArray:arguments];
+	[allArguments insertObject:arguments.firstObject atIndex:0];
+	char** argv = calloc(allArguments.count + 1, sizeof(char*));
+	if (!argv)
+	{
+		return -400;
+	}
+	NSMutableArray* cStrings = [NSMutableArray arrayWithCapacity:allArguments.count];
+	for (NSUInteger i = 0; i < allArguments.count; i++)
+	{
+		NSString* argument = allArguments[i];
+		char* copy = strdup(argument.UTF8String);
+		[cStrings addObject:[NSData dataWithBytes:copy length:strlen(copy) + 1]];
+		argv[i] = copy;
+	}
+	argv[allArguments.count] = NULL;
+	int outPipe[2];
+	if (pipe(outPipe) != 0)
+	{
+		free(argv);
+		return -400;
+	}
+	posix_spawn_file_actions_t fileActions;
+	posix_spawn_file_actions_init(&fileActions);
+	posix_spawn_file_actions_adddup2(&fileActions, outPipe[1], STDOUT_FILENO);
+	posix_spawn_file_actions_addclose(&fileActions, outPipe[0]);
+	posix_spawn_file_actions_adddup2(&fileActions, outPipe[1], STDERR_FILENO);
+	posix_spawn_file_actions_addclose(&fileActions, outPipe[1]);
+	posix_spawnattr_t attributes;
+	posix_spawnattr_init(&attributes);
+	posix_spawnattr_set_persona_np(&attributes, 99, WFS_POSIX_SPAWN_PERSONA_FLAGS_OVERRIDE);
+	posix_spawnattr_set_persona_uid_np(&attributes, 0);
+	posix_spawnattr_set_persona_gid_np(&attributes, 0);
+	pid_t pid = 0;
+	int spawnResult = posix_spawn(&pid, argv[0], &fileActions, &attributes, argv, environ);
+	posix_spawnattr_destroy(&attributes);
+	posix_spawn_file_actions_destroy(&fileActions);
+	free(argv);
+	if (spawnResult != 0)
+	{
+		close(outPipe[0]);
+		close(outPipe[1]);
+		return -200;
+	}
+	close(outPipe[1]);
+	NSLock* outputLock = [NSLock new];
+	NSMutableString* collected = [NSMutableString string];
+	dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^
+	{
+		int fd = outPipe[0];
+		char buffer[4096];
+		ssize_t bytesRead = 0;
+		while ((bytesRead = read(fd, buffer, sizeof(buffer))) > 0)
+		{
+			@autoreleasepool
+			{
+				NSString* chunk = [[NSString alloc] initWithBytes:buffer length:(NSUInteger)bytesRead encoding:NSUTF8StringEncoding];
+				if (chunk)
+				{
+					[outputLock lock];
+					[collected appendString:chunk];
+					[outputLock unlock];
+				}
+			}
+		}
+		close(fd);
+	});
+	struct timespec sleepTime = { 0, 100 * 1000 * 1000 };
+	int status = 0;
+	NSTimeInterval start = [NSProcessInfo processInfo].systemUptime;
+	NSInteger resultCode = -300;
+	NSUInteger lastScannedLength = 0;
+	while (waitpid(pid, &status, WNOHANG) == 0)
+	{
+		if (cancelled && *cancelled)
+		{
+			kill(pid, SIGKILL);
+			waitpid(pid, &status, 0);
+			resultCode = -301;
+			break;
+		}
+		if ([NSProcessInfo processInfo].systemUptime - start > timeout)
+		{
+			kill(pid, SIGKILL);
+			waitpid(pid, &status, 0);
+			resultCode = -300;
+			break;
+		}
+		[outputLock lock];
+		NSUInteger availableLength = collected.length;
+		NSString* newOutput = availableLength > lastScannedLength ? [collected substringFromIndex:lastScannedLength] : nil;
+		lastScannedLength = availableLength;
+		[outputLock unlock];
+		if (newOutput && progressHandler)
+		{
+			for (NSString* line in [newOutput componentsSeparatedByString:@"\n"])
+			{
+				if ([line hasPrefix:@"WFS_PROGRESS: "])
+				{
+					NSString* payload = [line substringFromIndex:@"WFS_PROGRESS: ".length];
+					NSArray* parts = [payload componentsSeparatedByString:@" "];
+					if (parts.count >= 2)
+					{
+						NSString* prettyStatus = [parts[1] stringByReplacingOccurrencesOfString:@"_" withString:@" "];
+						progressHandler([NSString stringWithFormat:@"Installing via system installer… %@%% (%@)", parts[0], prettyStatus]);
+					}
+				}
+			}
+		}
+		nanosleep(&sleepTime, NULL);
+	}
+	if (resultCode != -300 && resultCode != -301)
+	{
+		resultCode = WIFEXITED(status) ? WEXITSTATUS(status) : -300;
+	}
+	if (output)
+	{
+		[outputLock lock];
+		*output = [collected copy];
+		[outputLock unlock];
+	}
+	return resultCode;
 }
 
 @interface LSApplicationWorkspace (WFSManualInstall)
@@ -1198,7 +1330,7 @@ static BOOL WFSSpawnWithTimeout(NSArray* arguments, NSTimeInterval timeout, BOOL
 {
 	__block BOOL cancelled = NO;
 	__block BOOL finished = NO;
-	[self showInstallProgressWithMessage:@"Preparing app for install…" cancelHandler:^
+	[self showInstallProgressWithMessage:@"Installing via system installer…" cancelHandler:^
 	{
 		cancelled = YES;
 	}];
@@ -1210,58 +1342,122 @@ static BOOL WFSSpawnWithTimeout(NSArray* arguments, NSTimeInterval timeout, BOOL
 		{
 			return;
 		}
-		[self updateInstallProgressMessage:@"Extracting app bundle…"];
-		NSError* error = nil;
-		NSString* extractedAppPath = [self extractAppBundleFromIPAAtPath:path progress:^(NSUInteger completed, NSUInteger total)
+		NSString* executablePath = [NSBundle mainBundle].executablePath;
+		NSString* childOutput = nil;
+		NSInteger exitCode = WFSSpawnRootWithTimeout(@[ executablePath, @"--wfs-install", path ], 240.0, &cancelled, &childOutput, ^(NSString* message)
 		{
-			if (completed == 0 || completed == total || completed % 10 == 0)
+			[self updateInstallProgressMessage:message];
+		});
+		[self appendToInstallLog:[NSString stringWithFormat:@"[%@] install of %@ -> exit %ld\n%@\n---\n", [NSDate date], path, (long)exitCode, childOutput ?: @"(no output)"]];
+		if (cancelled)
+		{
+			[self finishInstallWithMessage:[NSString stringWithFormat:@"Install cancelled. The .ipa is saved to:\n%@", path] title:@"Cancelled" path:path finished:&finished];
+			return;
+		}
+		if (exitCode == -300)
+		{
+			[self finishInstallWithMessage:[NSString stringWithFormat:@"The system installer did not finish in time. The .ipa is saved to:\n%@\n\nYou can install it with TrollStore or Filza, or try again.", path] title:@"Install Taking Too Long" path:path finished:&finished];
+			return;
+		}
+		if (exitCode == -200 || exitCode == -400)
+		{
+			[self installIPAAutomaticallyManuallyAtPath:path cancelled:&cancelled finished:&finished];
+			return;
+		}
+		if (exitCode == 0)
+		{
+			[self finishInstallWithMessage:[NSString stringWithFormat:@"The app was installed successfully.\n\nSaved .ipa:\n%@", path] title:@"Installed" path:path finished:&finished];
+			return;
+		}
+		NSString* errorText = @"The installer returned an unknown error.";
+		for (NSString* line in [childOutput componentsSeparatedByString:@"\n"])
+		{
+			if ([line hasPrefix:@"WFS_ERROR: "])
 			{
-				[self updateInstallProgressMessage:[NSString stringWithFormat:@"Extracting app bundle… (%lu of %lu files)", (unsigned long)completed, (unsigned long)total]];
+				errorText = [line substringFromIndex:@"WFS_ERROR: ".length];
+				break;
 			}
-		} cancelFlag:&cancelled error:&error];
-		if (cancelled)
-		{
-			[self finishInstallWithMessage:[NSString stringWithFormat:@"Install cancelled. The .ipa is saved to:\n%@", path] title:@"Cancelled" path:path finished:&finished];
-			return;
 		}
-		if (!extractedAppPath)
-		{
-			[self finishInstallWithMessage:[NSString stringWithFormat:@"Could not extract the .ipa (%@). The .ipa is saved to:\n%@\n\nInstall it with TrollStore or Filza.", error.localizedDescription, path] title:@"Install Failed" path:path finished:&finished];
-			return;
-		}
-		if (cancelled)
-		{
-			[self finishInstallWithMessage:[NSString stringWithFormat:@"Install cancelled. The .ipa is saved to:\n%@", path] title:@"Cancelled" path:path finished:&finished];
-			return;
-		}
-		[self updateInstallProgressMessage:@"Copying app bundle…"];
-		NSString* installedPath = [self copyAppBundleToSystemAtPath:extractedAppPath error:&error];
-		[[NSFileManager defaultManager] removeItemAtPath:[extractedAppPath stringByDeletingLastPathComponent] error:nil];
-		if (cancelled)
-		{
-			[self finishInstallWithMessage:[NSString stringWithFormat:@"Install cancelled. The .ipa is saved to:\n%@", path] title:@"Cancelled" path:path finished:&finished];
-			return;
-		}
-		if (!installedPath)
-		{
-			[self finishInstallWithMessage:[NSString stringWithFormat:@"Could not install the app (%@). The .ipa is saved to:\n%@\n\nInstall it with TrollStore or Filza.", error.localizedDescription, path] title:@"Install Failed" path:path finished:&finished];
-			return;
-		}
-		[self updateInstallProgressMessage:@"Registering app with the system…"];
-		[self registerAppBundleAtPath:installedPath cancelFlag:&cancelled];
-		if (cancelled)
-		{
-			[self finishInstallWithMessage:[NSString stringWithFormat:@"Install cancelled. The .ipa is saved to:\n%@", path] title:@"Cancelled" path:path finished:&finished];
-			return;
-		}
-		[self finishInstallWithMessage:[NSString stringWithFormat:@"The app was installed successfully.\n\nSaved .ipa:\n%@", path] title:@"Installed" path:path finished:&finished];
+		[self finishInstallWithMessage:[NSString stringWithFormat:@"The system installer failed: %@\n\nThe .ipa is saved to:\n%@\n\nPaid apps require the device to be signed into the App Store with the same Apple ID. You can also install it with TrollStore or Filza.", errorText, path] title:@"Install Failed" path:path finished:&finished];
 	});
-	dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(180 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^
+	dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(300 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^
 	{
 		if (!finished)
 		{
 			[self dismissDownloadProgress];
 			[self showAlert:@"Install Taking Too Long" message:[NSString stringWithFormat:@"The install did not finish in time. The .ipa is saved to:\n%@\n\nYou can install it with TrollStore or Filza, or try again.", path]];
+		}
+	});
+}
+
+- (void)installIPAAutomaticallyManuallyAtPath:(NSString*)path cancelled:(BOOL*)cancelled finished:(BOOL*)finished
+{
+	[self updateInstallProgressMessage:@"Extracting app bundle…"];
+	NSError* error = nil;
+	NSString* extractedAppPath = [self extractAppBundleFromIPAAtPath:path progress:^(NSUInteger completed, NSUInteger total)
+	{
+		if (completed == 0 || completed == total || completed % 10 == 0)
+		{
+			[self updateInstallProgressMessage:[NSString stringWithFormat:@"Extracting app bundle… (%lu of %lu files)", (unsigned long)completed, (unsigned long)total]];
+		}
+	} cancelFlag:cancelled error:&error];
+	if (*cancelled)
+	{
+		[self finishInstallWithMessage:[NSString stringWithFormat:@"Install cancelled. The .ipa is saved to:\n%@", path] title:@"Cancelled" path:path finished:finished];
+		return;
+	}
+	if (!extractedAppPath)
+	{
+		[self finishInstallWithMessage:[NSString stringWithFormat:@"Could not extract the .ipa (%@). The .ipa is saved to:\n%@\n\nInstall it with TrollStore or Filza.", error.localizedDescription, path] title:@"Install Failed" path:path finished:finished];
+		return;
+	}
+	if (*cancelled)
+	{
+		[self finishInstallWithMessage:[NSString stringWithFormat:@"Install cancelled. The .ipa is saved to:\n%@", path] title:@"Cancelled" path:path finished:finished];
+		return;
+	}
+	[self updateInstallProgressMessage:@"Copying app bundle…"];
+	NSString* installedPath = [self copyAppBundleToSystemAtPath:extractedAppPath error:&error];
+	[[NSFileManager defaultManager] removeItemAtPath:[extractedAppPath stringByDeletingLastPathComponent] error:nil];
+	if (*cancelled)
+	{
+		[self finishInstallWithMessage:[NSString stringWithFormat:@"Install cancelled. The .ipa is saved to:\n%@", path] title:@"Cancelled" path:path finished:finished];
+		return;
+	}
+	if (!installedPath)
+	{
+		[self finishInstallWithMessage:[NSString stringWithFormat:@"Could not install the app (%@). The .ipa is saved to:\n%@\n\nInstall it with TrollStore or Filza.", error.localizedDescription, path] title:@"Install Failed" path:path finished:finished];
+		return;
+	}
+	[self updateInstallProgressMessage:@"Registering app with the system…"];
+	[self registerAppBundleAtPath:installedPath cancelFlag:cancelled];
+	if (*cancelled)
+	{
+		[self finishInstallWithMessage:[NSString stringWithFormat:@"Install cancelled. The .ipa is saved to:\n%@", path] title:@"Cancelled" path:path finished:finished];
+		return;
+	}
+	[self finishInstallWithMessage:[NSString stringWithFormat:@"The app was installed successfully.\n\nSaved .ipa:\n%@", path] title:@"Installed" path:path finished:finished];
+}
+
+- (void)appendToInstallLog:(NSString*)line
+{
+	NSString* logPath = [[NSHomeDirectory() stringByAppendingPathComponent:@"Documents"] stringByAppendingPathComponent:@"WaffleStore_install.log"];
+	dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^
+	{
+		NSFileHandle* handle = [NSFileHandle fileHandleForWritingAtPath:logPath];
+		if (!handle)
+		{
+			[line writeToFile:logPath atomically:YES encoding:NSUTF8StringEncoding error:nil];
+			return;
+		}
+		@try
+		{
+			[handle seekToEndOfFile];
+			[handle writeData:[line dataUsingEncoding:NSUTF8StringEncoding]];
+			[handle closeFile];
+		}
+		@catch (NSException* exception)
+		{
 		}
 	});
 }

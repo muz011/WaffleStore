@@ -4,6 +4,8 @@
 <dict>
     <key>platform-application</key>
 	<true/>
+	<key>com.apple.private.persona-mgmt</key>
+	<true/>
 	<key>application-identifier</key>
     <string>org.muz011.wafflestore</string>
 	<key>com.apple.CommCenter.fine-grained</key>
