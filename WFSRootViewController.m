@@ -1462,12 +1462,13 @@ static NSInteger WFSSpawnRootWithTimeout(NSArray* arguments, NSTimeInterval time
 	}
 	NSUInteger readLength = 4096;
 	NSNumber* cryptid = nil;
-	for (int attempt = 0; attempt < 3 && !cryptid; attempt++)
+	for (int attempt = 0; attempt < 4 && !cryptid; attempt++)
 	{
 		cryptid = [self cryptidFromMachOHeader:execHeader];
-		if (!cryptid && [self isFatMachOHeader:execHeader])
+		WFSMachOType machOType = [self machOTypeFromHeader:execHeader];
+		if (!cryptid && (machOType == WFSMachOTypeFat || machOType == WFSMachOTypeFat64))
 		{
-			readLength *= 4;
+			readLength *= 16;
 			NSFileHandle* reopenHandle = [NSFileHandle fileHandleForReadingAtPath:path];
 			if (!reopenHandle)
 			{
@@ -1483,23 +1484,67 @@ static NSInteger WFSSpawnRootWithTimeout(NSArray* arguments, NSTimeInterval time
 	}
 	if (!cryptid)
 	{
-		return @{@"error": @"main executable is not a valid Mach-O binary"};
+		[self appendToInstallLog:[NSString stringWithFormat:@"[%@] unrecognized main executable format in %@; proceeding with the install anyway.\n---\n", [NSDate date], path]];
+		return nil;
 	}
 	return cryptid.boolValue ? @{@"encrypted": @YES} : nil;
 }
 
-static uint32_t wfsUInt32(const uint8_t* bytes)
+typedef NS_ENUM(NSInteger, WFSMachOType)
 {
-	return (uint32_t)(bytes[0] | (bytes[1] << 8) | (bytes[2] << 16) | (bytes[3] << 24));
+	WFSMachOTypeUnknown = 0,
+	WFSMachOTypeMachO32,
+	WFSMachOTypeMachO64,
+	WFSMachOTypeFat,
+	WFSMachOTypeFat64
+};
+
+static uint32_t wfsReadU32(const uint8_t* bytes, BOOL bigEndian)
+{
+	if (bigEndian)
+	{
+		return (uint32_t)(((uint32_t)bytes[0] << 24) | ((uint32_t)bytes[1] << 16) | ((uint32_t)bytes[2] << 8) | (uint32_t)bytes[3]);
+	}
+	return (uint32_t)((uint32_t)bytes[0] | ((uint32_t)bytes[1] << 8) | ((uint32_t)bytes[2] << 16) | ((uint32_t)bytes[3] << 24));
 }
 
-- (BOOL)isFatMachOHeader:(NSData*)header
+static uint64_t wfsReadU64(const uint8_t* bytes, BOOL bigEndian)
+{
+	if (bigEndian)
+	{
+		return ((uint64_t)wfsReadU32(bytes, YES) << 32) | (uint64_t)wfsReadU32(bytes + 4, YES);
+	}
+	return (uint64_t)wfsReadU32(bytes, NO) | ((uint64_t)wfsReadU32(bytes + 4, NO) << 32);
+}
+
+- (WFSMachOType)machOTypeFromHeader:(NSData*)header
 {
 	if (header.length < 4)
 	{
-		return NO;
+		return WFSMachOTypeUnknown;
 	}
-	return wfsUInt32(header.bytes) == 0xCAFEBABE;
+	const uint8_t* b = header.bytes;
+	if ((b[0] == 0xCF && b[1] == 0xFA && b[2] == 0xED && b[3] == 0xFE) || (b[0] == 0xFE && b[1] == 0xED && b[2] == 0xFA && b[3] == 0xCF))
+	{
+		return WFSMachOTypeMachO64;
+	}
+	if ((b[0] == 0xCE && b[1] == 0xFA && b[2] == 0xED && b[3] == 0xFE) || (b[0] == 0xFE && b[1] == 0xED && b[2] == 0xFA && b[3] == 0xCE))
+	{
+		return WFSMachOTypeMachO32;
+	}
+	if (b[0] == 0xCA && b[1] == 0xFE && b[2] == 0xBA && b[3] == 0xBE)
+	{
+		return WFSMachOTypeFat;
+	}
+	if (b[0] == 0xCA && b[1] == 0xFE && b[2] == 0xBA && b[3] == 0xBF)
+	{
+		return WFSMachOTypeFat64;
+	}
+	if (b[0] == 0xBE && b[1] == 0xBA && b[2] == 0xFE && b[3] == 0xCA)
+	{
+		return WFSMachOTypeFat;
+	}
+	return WFSMachOTypeUnknown;
 }
 
 - (NSNumber*)cryptidFromMachOHeader:(NSData*)header
@@ -1508,23 +1553,24 @@ static uint32_t wfsUInt32(const uint8_t* bytes)
 	{
 		return nil;
 	}
+	WFSMachOType type = [self machOTypeFromHeader:header];
 	const uint8_t* mh = header.bytes;
-	uint32_t magic = wfsUInt32(mh);
-	if (magic == 0xFEEDFACF)
+	if (type == WFSMachOTypeMachO64)
 	{
+		BOOL bigEndian = mh[0] == 0xFE;
 		if (header.length < 32)
 		{
 			return nil;
 		}
-		uint32_t ncmds = wfsUInt32(mh + 16);
+		uint32_t ncmds = wfsReadU32(mh + 16, bigEndian);
 		NSUInteger off = 32;
 		for (uint32_t i = 0; i < ncmds && off + 8 <= header.length; i++)
 		{
-			uint32_t cmd = wfsUInt32(mh + off);
-			uint32_t cmdSize = wfsUInt32(mh + off + 4);
+			uint32_t cmd = wfsReadU32(mh + off, bigEndian);
+			uint32_t cmdSize = wfsReadU32(mh + off + 4, bigEndian);
 			if (cmd == 0x2C && off + 20 <= header.length)
 			{
-				return @(wfsUInt32(mh + off + 16) != 0);
+				return @(wfsReadU32(mh + off + 16, bigEndian) != 0);
 			}
 			if (cmdSize == 0)
 			{
@@ -1534,21 +1580,22 @@ static uint32_t wfsUInt32(const uint8_t* bytes)
 		}
 		return @NO;
 	}
-	if (magic == 0xFEEDFACE)
+	if (type == WFSMachOTypeMachO32)
 	{
+		BOOL bigEndian = mh[0] == 0xFE;
 		if (header.length < 28)
 		{
 			return nil;
 		}
-		uint32_t ncmds = wfsUInt32(mh + 16);
+		uint32_t ncmds = wfsReadU32(mh + 16, bigEndian);
 		NSUInteger off = 28;
 		for (uint32_t i = 0; i < ncmds && off + 8 <= header.length; i++)
 		{
-			uint32_t cmd = wfsUInt32(mh + off);
-			uint32_t cmdSize = wfsUInt32(mh + off + 4);
+			uint32_t cmd = wfsReadU32(mh + off, bigEndian);
+			uint32_t cmdSize = wfsReadU32(mh + off + 4, bigEndian);
 			if (cmd == 0x21 && off + 12 <= header.length)
 			{
-				return @(wfsUInt32(mh + off + 8) != 0);
+				return @(wfsReadU32(mh + off + 8, bigEndian) != 0);
 			}
 			if (cmdSize == 0)
 			{
@@ -1558,31 +1605,37 @@ static uint32_t wfsUInt32(const uint8_t* bytes)
 		}
 		return @NO;
 	}
-	if (magic == 0xCAFEBABE)
+	if (type == WFSMachOTypeFat || type == WFSMachOTypeFat64)
 	{
+		BOOL bigEndian = mh[0] != 0xBE;
 		if (header.length < 8)
 		{
 			return nil;
 		}
-		uint32_t nfat = wfsUInt32(mh + 4);
+		uint32_t nfat = wfsReadU32(mh + 4, bigEndian);
 		if (nfat == 0 || nfat > 64)
 		{
 			return nil;
 		}
+		NSUInteger entrySize = type == WFSMachOTypeFat64 ? 32 : 20;
 		NSUInteger off = 8;
 		for (uint32_t i = 0; i < nfat; i++)
 		{
-			if (off + 20 > header.length)
+			if (off + entrySize > header.length)
 			{
 				return nil;
 			}
-			uint32_t cpuType = wfsUInt32(mh + off);
-			uint32_t fileOff = wfsUInt32(mh + off + 8);
-			if (cpuType == 0x0100000C && fileOff > 0 && fileOff < header.length)
+			uint32_t cpuType = wfsReadU32(mh + off, bigEndian);
+			uint64_t fileOff = type == WFSMachOTypeFat64 ? wfsReadU64(mh + off + 8, bigEndian) : wfsReadU32(mh + off + 8, bigEndian);
+			if ((cpuType & 0x00FFFFFF) == 12)
 			{
-				return [self cryptidFromMachOHeader:[header subdataWithRange:NSMakeRange(fileOff, header.length - fileOff)]];
+				if (fileOff == 0 || fileOff >= header.length)
+				{
+					return nil;
+				}
+				return [self cryptidFromMachOHeader:[header subdataWithRange:NSMakeRange((NSUInteger)fileOff, header.length - (NSUInteger)fileOff)]];
 			}
-			off += 20;
+			off += entrySize;
 		}
 		return nil;
 	}
