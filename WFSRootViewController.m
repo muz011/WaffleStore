@@ -3,6 +3,7 @@
 #import "WFSAppleIDDownloader.h"
 #import "CoreServices.h"
 #import <SystemConfiguration/SystemConfiguration.h>
+#import <Security/Security.h>
 #import <zlib.h>
 #import <spawn.h>
 #import <string.h>
@@ -11,13 +12,108 @@
 #import <signal.h>
 #import <time.h>
 #import <unistd.h>
+#import <dlfcn.h>
 
 extern char** environ;
 
-#define WFS_POSIX_SPAWN_PERSONA_FLAGS_OVERRIDE 1
 extern int posix_spawnattr_set_persona_np(const posix_spawnattr_t* __restrict attrs, uid_t persona_id, uint32_t flags);
 extern int posix_spawnattr_set_persona_uid_np(const posix_spawnattr_t* __restrict attrs, uid_t uid);
 extern int posix_spawnattr_set_persona_gid_np(const posix_spawnattr_t* __restrict attrs, gid_t gid);
+extern int posix_spawnattr_set_persona_groups_np(const posix_spawnattr_t* __restrict attrs, gid_t* groups, int ngroups);
+extern int posix_spawnattr_set_persona_flags_np(const posix_spawnattr_t* __restrict attrs, uint32_t flags);
+
+typedef int (*WFSJBInitFn)(void);
+typedef int (*WFSJBClientCloseFn)(void);
+typedef int (*WFSJBClientSpawnFn)(uid_t uid, gid_t gid, int argc, char** argv, void (^callback)(pid_t pid));
+
+static NSNumber* wfsEffectiveEntitlement(NSString* key)
+{
+	SecTaskRef task = SecTaskCreateFromSelf(NULL);
+	if (!task)
+	{
+		return nil;
+	}
+	CFTypeRef value = SecTaskCopyValueForEntitlement(task, (__bridge CFStringRef)key, NULL);
+	CFRelease(task);
+	if (!value)
+	{
+		return @NO;
+	}
+	if (CFGetTypeID(value) == CFBooleanGetTypeID())
+	{
+		BOOL result = CFBooleanGetValue((CFBooleanRef)value);
+		CFRelease(value);
+		return @(result);
+	}
+	CFRelease(value);
+	return nil;
+}
+
+static void* wfsJailbreakdHandle(void)
+{
+	static void* cachedHandle = NULL;
+	static dispatch_once_t onceToken;
+	dispatch_once(&onceToken, ^
+	{
+		cachedHandle = dlopen("/var/jb/usr/lib/libjailbreak.dylib", RTLD_LAZY);
+		if (!cachedHandle)
+		{
+			cachedHandle = dlopen("/jb/libjailbreak.dylib", RTLD_LAZY);
+		}
+	});
+	return cachedHandle;
+}
+
+static NSString* wfsReadNewLogData(NSString* path, NSUInteger* byteCursor)
+{
+	NSData* data = [NSData dataWithContentsOfFile:path];
+	if (!data || data.length <= *byteCursor)
+	{
+		return nil;
+	}
+	NSRange range = NSMakeRange(*byteCursor, data.length - *byteCursor);
+	*byteCursor = data.length;
+	NSData* newData = [data subdataWithRange:range];
+	NSString* output = [[NSString alloc] initWithData:newData encoding:NSUTF8StringEncoding];
+	if (!output)
+	{
+		output = [[NSString alloc] initWithData:newData encoding:NSASCIIStringEncoding];
+	}
+	return output;
+}
+
+static void wfsDrainLogFile(NSString* path, NSUInteger* cursor, void (^outputHandler)(NSString* chunk), void (^progressHandler)(NSString* message))
+{
+	if (!path)
+	{
+		return;
+	}
+	NSString* newOutput = wfsReadNewLogData(path, cursor);
+	if (!newOutput || newOutput.length == 0)
+	{
+		return;
+	}
+	if (outputHandler)
+	{
+		outputHandler(newOutput);
+	}
+	if (progressHandler)
+	{
+		for (NSString* line in [newOutput componentsSeparatedByString:@"\n"])
+		{
+			if ([line hasPrefix:@"WFS_PROGRESS: "])
+			{
+				NSString* payload = [line substringFromIndex:@"WFS_PROGRESS: ".length];
+				NSArray* parts = [payload componentsSeparatedByString:@" "];
+				if (parts.count >= 2)
+				{
+					NSString* prettyStatus = [parts[1] stringByReplacingOccurrencesOfString:@"_" withString:@" "];
+					progressHandler([NSString stringWithFormat:@"Installing via system installer… %@%% (%@)", parts[0], prettyStatus]);
+				}
+			}
+		}
+	}
+}
 
 static BOOL WFSSpawnWithTimeout(NSArray* arguments, NSTimeInterval timeout, BOOL* cancelled)
 {
@@ -69,10 +165,16 @@ static BOOL WFSSpawnWithTimeout(NSArray* arguments, NSTimeInterval timeout, BOOL
 	return WIFEXITED(status) && WEXITSTATUS(status) == 0;
 }
 
-static NSInteger WFSSpawnRootWithTimeout(NSArray* arguments, NSTimeInterval timeout, BOOL* cancelled, NSString** output, int* spawnErrnoOut, void (^progressHandler)(NSString* message), void (^outputHandler)(NSString* chunk))
+static NSInteger WFSSpawnRootWithTimeout(NSArray* arguments, NSString* logFilePath, NSTimeInterval timeout, BOOL* cancelled, NSString** output, int* spawnErrnoOut, NSString** methodUsedOut, void (^progressHandler)(NSString* message), void (^outputHandler)(NSString* chunk))
 {
+	if (logFilePath && ![[NSFileManager defaultManager] fileExistsAtPath:logFilePath])
+	{
+		[NSData.data writeToFile:logFilePath atomically:NO];
+	}
 	NSMutableArray* allArguments = [NSMutableArray arrayWithArray:arguments];
 	[allArguments insertObject:arguments.firstObject atIndex:0];
+	[allArguments addObject:@"--wfs-log"];
+	[allArguments addObject:logFilePath ?: @""];
 	char** argv = calloc(allArguments.count + 1, sizeof(char*));
 	if (!argv)
 	{
@@ -87,67 +189,115 @@ static NSInteger WFSSpawnRootWithTimeout(NSArray* arguments, NSTimeInterval time
 		argv[i] = copy;
 	}
 	argv[allArguments.count] = NULL;
-	int outPipe[2];
-	if (pipe(outPipe) != 0)
+	struct timespec sleepTime = { 0, 100 * 1000 * 1000 };
+	NSTimeInterval start = [NSProcessInfo processInfo].systemUptime;
+	NSUInteger logCursor = 0;
+
+	void* jbHandle = wfsJailbreakdHandle();
+	if (jbHandle)
 	{
-		free(argv);
-		return -400;
+		WFSJBInitFn jbInit = (WFSJBInitFn)dlsym(jbHandle, "jb_init");
+		WFSJBClientSpawnFn jbSpawn = (WFSJBClientSpawnFn)dlsym(jbHandle, "jb_client_spawn");
+		if (jbInit && jbSpawn)
+		{
+			int initResult = jbInit();
+			if (initResult == 0)
+			{
+				__block pid_t spawnedPid = -1;
+				int spawnResult = jbSpawn(0, 0, (int)allArguments.count, argv, ^(pid_t pid)
+				{
+					spawnedPid = pid;
+				});
+				(void)spawnedPid;
+				if (spawnResult == 0)
+				{
+					if (methodUsedOut)
+					{
+						*methodUsedOut = @"jailbreakd";
+					}
+					NSInteger resultCode = -300;
+					while (YES)
+					{
+						if (cancelled && *cancelled)
+						{
+							resultCode = -301;
+							break;
+						}
+						if ([NSProcessInfo processInfo].systemUptime - start > timeout)
+						{
+							resultCode = -300;
+							break;
+						}
+						wfsDrainLogFile(logFilePath, &logCursor, outputHandler, progressHandler);
+						NSString* fullLog = [[NSString alloc] initWithContentsOfFile:logFilePath encoding:NSUTF8StringEncoding error:nil];
+						if ([fullLog rangeOfString:@"WFS_RESULT: "].location != NSNotFound)
+						{
+							NSArray* lines = [fullLog componentsSeparatedByString:@"\n"];
+							NSString* resultLine = nil;
+							for (NSString* line in lines)
+							{
+								if ([line hasPrefix:@"WFS_RESULT: "])
+								{
+									resultLine = line;
+								}
+							}
+							resultCode = resultLine ? [[resultLine substringFromIndex:@"WFS_RESULT: ".length] integerValue] : 1;
+							break;
+						}
+						nanosleep(&sleepTime, NULL);
+					}
+					wfsDrainLogFile(logFilePath, &logCursor, outputHandler, progressHandler);
+					if (output)
+					{
+						*output = [[NSString alloc] initWithContentsOfFile:logFilePath encoding:NSUTF8StringEncoding error:nil];
+					}
+					free(argv);
+					return resultCode;
+				}
+				if (spawnErrnoOut)
+				{
+					*spawnErrnoOut = spawnResult;
+				}
+				if (methodUsedOut)
+				{
+					*methodUsedOut = @"jailbreakd(spawn-failed)";
+				}
+				free(argv);
+				return -200;
+			}
+		}
 	}
-	posix_spawn_file_actions_t fileActions;
-	posix_spawn_file_actions_init(&fileActions);
-	posix_spawn_file_actions_adddup2(&fileActions, outPipe[1], STDOUT_FILENO);
-	posix_spawn_file_actions_addclose(&fileActions, outPipe[0]);
-	posix_spawn_file_actions_adddup2(&fileActions, outPipe[1], STDERR_FILENO);
-	posix_spawn_file_actions_addclose(&fileActions, outPipe[1]);
+
+	start = [NSProcessInfo processInfo].systemUptime;
 	posix_spawnattr_t attributes;
 	posix_spawnattr_init(&attributes);
-	posix_spawnattr_set_persona_np(&attributes, 99, WFS_POSIX_SPAWN_PERSONA_FLAGS_OVERRIDE);
+	posix_spawnattr_set_persona_np(&attributes, 99, 0);
 	posix_spawnattr_set_persona_uid_np(&attributes, 0);
 	posix_spawnattr_set_persona_gid_np(&attributes, 0);
+	posix_spawnattr_set_persona_groups_np(&attributes, NULL, 0);
+	posix_spawnattr_set_persona_flags_np(&attributes, 0);
 	pid_t pid = 0;
-	int spawnResult = posix_spawn(&pid, argv[0], &fileActions, &attributes, argv, environ);
+	int spawnResult = posix_spawn(&pid, argv[0], NULL, &attributes, argv, environ);
 	posix_spawnattr_destroy(&attributes);
-	posix_spawn_file_actions_destroy(&fileActions);
-	free(argv);
 	if (spawnResult != 0)
 	{
-		close(outPipe[0]);
-		close(outPipe[1]);
+		free(argv);
 		if (spawnErrnoOut)
 		{
 			*spawnErrnoOut = spawnResult;
 		}
+		if (methodUsedOut)
+		{
+			*methodUsedOut = @"persona";
+		}
 		return -200;
 	}
-	close(outPipe[1]);
-	int readFd = outPipe[0];
-	NSLock* outputLock = [NSLock new];
-	NSMutableString* collected = [NSMutableString string];
-	dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^
+	if (methodUsedOut)
 	{
-		int fd = readFd;
-		char buffer[4096];
-		ssize_t bytesRead = 0;
-		while ((bytesRead = read(fd, buffer, sizeof(buffer))) > 0)
-		{
-			@autoreleasepool
-			{
-				NSString* chunk = [[NSString alloc] initWithBytes:buffer length:(NSUInteger)bytesRead encoding:NSUTF8StringEncoding];
-				if (chunk)
-				{
-					[outputLock lock];
-					[collected appendString:chunk];
-					[outputLock unlock];
-				}
-			}
-		}
-		close(fd);
-	});
-	struct timespec sleepTime = { 0, 100 * 1000 * 1000 };
+		*methodUsedOut = @"persona";
+	}
 	int status = 0;
-	NSTimeInterval start = [NSProcessInfo processInfo].systemUptime;
 	NSInteger resultCode = -300;
-	NSUInteger lastScannedLength = 0;
 	while (waitpid(pid, &status, WNOHANG) == 0)
 	{
 		if (cancelled && *cancelled)
@@ -164,46 +314,19 @@ static NSInteger WFSSpawnRootWithTimeout(NSArray* arguments, NSTimeInterval time
 			resultCode = -300;
 			break;
 		}
-		[outputLock lock];
-		NSUInteger availableLength = collected.length;
-		NSString* newOutput = availableLength > lastScannedLength ? [collected substringFromIndex:lastScannedLength] : nil;
-		lastScannedLength = availableLength;
-		[outputLock unlock];
-		if (newOutput)
-		{
-			if (outputHandler && newOutput.length > 0)
-			{
-				outputHandler(newOutput);
-			}
-			if (progressHandler)
-			{
-				for (NSString* line in [newOutput componentsSeparatedByString:@"\n"])
-				{
-					if ([line hasPrefix:@"WFS_PROGRESS: "])
-					{
-						NSString* payload = [line substringFromIndex:@"WFS_PROGRESS: ".length];
-						NSArray* parts = [payload componentsSeparatedByString:@" "];
-						if (parts.count >= 2)
-						{
-							NSString* prettyStatus = [parts[1] stringByReplacingOccurrencesOfString:@"_" withString:@" "];
-							progressHandler([NSString stringWithFormat:@"Installing via system installer… %@%% (%@)", parts[0], prettyStatus]);
-						}
-					}
-				}
-			}
-		}
+		wfsDrainLogFile(logFilePath, &logCursor, outputHandler, progressHandler);
 		nanosleep(&sleepTime, NULL);
 	}
+	wfsDrainLogFile(logFilePath, &logCursor, outputHandler, progressHandler);
 	if (resultCode != -300 && resultCode != -301)
 	{
 		resultCode = WIFEXITED(status) ? WEXITSTATUS(status) : -300;
 	}
 	if (output)
 	{
-		[outputLock lock];
-		*output = [collected copy];
-		[outputLock unlock];
+		*output = [[NSString alloc] initWithContentsOfFile:logFilePath encoding:NSUTF8StringEncoding error:nil];
 	}
+	free(argv);
 	return resultCode;
 }
 
@@ -1809,14 +1932,21 @@ static uint64_t wfsReadU64(const uint8_t* bytes, BOOL bigEndian)
 		NSString* executablePath = [NSBundle mainBundle].executablePath;
 		NSString* childOutput = nil;
 		int spawnErrno = 0;
-		NSInteger exitCode = WFSSpawnRootWithTimeout(@[ executablePath, @"--wfs-install", path ], 240.0, &cancelled, &childOutput, &spawnErrno, ^(NSString* message)
+		NSString* methodUsed = nil;
+		NSString* logFilePath = [NSTemporaryDirectory() stringByAppendingPathComponent:@"wfs-install-child.log"];
+		[[NSFileManager defaultManager] removeItemAtPath:logFilePath error:nil];
+		NSNumber* personaEntitlement = wfsEffectiveEntitlement(@"com.apple.private.persona-mgmt");
+		NSNumber* noSandboxEntitlement = wfsEffectiveEntitlement(@"com.apple.private.security.no-sandbox");
+		NSNumber* platformEntitlement = wfsEffectiveEntitlement(@"platform-application");
+		[self appendToInstallLog:[NSString stringWithFormat:@"[%@] effective entitlements: persona-mgmt=%@ no-sandbox=%@ platform-application=%@ libjailbreak=%d\n", [NSDate date], personaEntitlement ?: @"(unavailable)", noSandboxEntitlement ?: @"(unavailable)", platformEntitlement ?: @"(unavailable)", wfsJailbreakdHandle() != NULL]];
+		NSInteger exitCode = WFSSpawnRootWithTimeout(@[ executablePath, @"--wfs-install", path ], logFilePath, 240.0, &cancelled, &childOutput, &spawnErrno, &methodUsed, ^(NSString* message)
 		{
 			[self updateInstallProgressMessage:message];
 		}, ^(NSString* chunk)
 		{
 			[self appendToInstallLog:[NSString stringWithFormat:@"[%@] child: %@", [NSDate date], chunk]];
 		});
-		[self appendToInstallLog:[NSString stringWithFormat:@"[%@] install of %@ -> exit %ld (spawn errno %d, encrypted %d)\n%@\n---\n", [NSDate date], path, (long)exitCode, spawnErrno, encrypted, childOutput ?: @"(no output)"]];
+		[self appendToInstallLog:[NSString stringWithFormat:@"[%@] install of %@ -> exit %ld (spawn errno %d, encrypted %d, method %@)\n%@\n---\n", [NSDate date], path, (long)exitCode, spawnErrno, encrypted, methodUsed ?: @"?", childOutput ?: @"(no output)"]];
 		if (cancelled)
 		{
 			[self finishInstallWithMessage:[NSString stringWithFormat:@"Install cancelled. The .ipa is saved to:\n%@", path] title:@"Cancelled" path:path finished:&finished];
@@ -1831,9 +1961,13 @@ static uint64_t wfsReadU64(const uint8_t* bytes, BOOL bigEndian)
 		if (exitCode == -200 || exitCode == -400)
 		{
 			NSString* errnoText = [NSString stringWithFormat:@"error %d (%s)", spawnErrno, strerror(spawnErrno)];
+			NSString* methodText = methodUsed ?: @"?";
+			NSString* entitlementsText = [NSString stringWithFormat:@"persona-mgmt=%@ no-sandbox=%@ platform-application=%@", personaEntitlement ?: @"(unavailable)", noSandboxEntitlement ?: @"(unavailable)", platformEntitlement ?: @"(unavailable)"];
+			NSString* reinstallHint = [personaEntitlement boolValue] ? @"WaffleStore has the root entitlement, so this iOS build likely blocks root-spawn helpers. Check Settings > Privacy & Security and confirm the jailbreak is bootstrapped (Sileo opens)." : @"WaffleStore was signed without the root entitlement (stale install). Reinstall WaffleStore via TrollStore, then try again.";
+			[self appendToInstallLog:[NSString stringWithFormat:@"[%@] root installer unavailable: method %@, %@, entitlements %@\n", [NSDate date], methodText, errnoText, entitlementsText]];
 			if (spawnErrno == 1)
 			{
-				[self finishInstallWithMessage:[NSString stringWithFormat:@"The system installer could not run as root (%@).\n\nThis happens on iOS 17.6+ or when WaffleStore was not reinstalled after the root-install update. Reinstall WaffleStore via TrollStore, then try again.\n\nThe .ipa is saved to:\n%@", errnoText, path] title:@"Root Installer Blocked" path:path finished:&finished];
+				[self finishInstallWithMessage:[NSString stringWithFormat:@"The system installer could not run as root (%@).\n\n%@\n\nDiagnostics: method %@, %@\n\nReinstall WaffleStore via TrollStore if prompted.\n\nThe .ipa is saved to:\n%@", errnoText, reinstallHint, methodText, entitlementsText, path] title:@"Root Installer Blocked" path:path finished:&finished];
 				return;
 			}
 			if (!encrypted)
