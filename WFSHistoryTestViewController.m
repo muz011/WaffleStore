@@ -6,6 +6,7 @@
 	UIButton* _fetchButton;
 	UIButton* _probeButton;
 	UIButton* _clearButton;
+	UISegmentedControl* _rangeControl;
 	UILabel* _statusLabel;
 	UITextView* _logView;
 	BOOL _running;
@@ -18,11 +19,14 @@
 	self.view.backgroundColor = [UIColor systemGroupedBackgroundColor];
 
 	_fetchButton = [UIButton buttonWithType:UIButtonTypeSystem];
-	[_fetchButton setTitle:@"Commerce History (90d)" forState:UIControlStateNormal];
+	[_fetchButton setTitle:@"Fetch Commerce History" forState:UIControlStateNormal];
 	[_fetchButton setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
 	_fetchButton.backgroundColor = [UIColor systemBlueColor];
 	_fetchButton.layer.cornerRadius = 10;
 	[_fetchButton addTarget:self action:@selector(startTest) forControlEvents:UIControlEventTouchUpInside];
+
+	_rangeControl = [[UISegmentedControl alloc] initWithItems:@[@"90d", @"2026", @"2025", @"2024", @"All"]];
+	_rangeControl.selectedSegmentIndex = 0;
 
 	_probeButton = [UIButton buttonWithType:UIButtonTypeSystem];
 	[_probeButton setTitle:@"Probe Range Values" forState:UIControlStateNormal];
@@ -50,6 +54,7 @@
 	_logView.text = @"Purchase history test.\n";
 
 	[self.view addSubview:_fetchButton];
+	[self.view addSubview:_rangeControl];
 	[self.view addSubview:_probeButton];
 	[self.view addSubview:_clearButton];
 	[self.view addSubview:_statusLabel];
@@ -61,6 +66,7 @@
 - (void)setupConstraints
 {
 	_fetchButton.translatesAutoresizingMaskIntoConstraints = NO;
+	_rangeControl.translatesAutoresizingMaskIntoConstraints = NO;
 	_probeButton.translatesAutoresizingMaskIntoConstraints = NO;
 	_clearButton.translatesAutoresizingMaskIntoConstraints = NO;
 	_statusLabel.translatesAutoresizingMaskIntoConstraints = NO;
@@ -72,7 +78,11 @@
 		[_fetchButton.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor constant:-16],
 		[_fetchButton.heightAnchor constraintEqualToConstant:44],
 
-		[_probeButton.topAnchor constraintEqualToAnchor:_fetchButton.bottomAnchor constant:10],
+		[_rangeControl.topAnchor constraintEqualToAnchor:_fetchButton.bottomAnchor constant:10],
+		[_rangeControl.leadingAnchor constraintEqualToAnchor:_fetchButton.leadingAnchor],
+		[_rangeControl.trailingAnchor constraintEqualToAnchor:_fetchButton.trailingAnchor],
+
+		[_probeButton.topAnchor constraintEqualToAnchor:_rangeControl.bottomAnchor constant:10],
 		[_probeButton.leadingAnchor constraintEqualToAnchor:_fetchButton.leadingAnchor],
 		[_probeButton.trailingAnchor constraintEqualToAnchor:_fetchButton.trailingAnchor],
 		[_probeButton.heightAnchor constraintEqualToConstant:40],
@@ -132,9 +142,10 @@
 	[_fetchButton setTitle:@"Fetching…" forState:UIControlStateNormal];
 	[self appendLog:@"---"];
 	[self appendLog:[NSString stringWithFormat:@"guid: %@", downloader.guid ?: @"?"]];
-	[self setStatus:@"Fetching commerce history (range=last90Days)…"];
+	NSString* range = [self selectedRangeString];
+	[self setStatus:[NSString stringWithFormat:@"Fetching commerce history (range=%@)…", range]];
 	__weak typeof(self) weakSelf = self;
-	[self fetchCommercePagesWithRange:@"last90Days" token:nil purchases:[NSMutableArray array] completion:^(NSArray* purchases, NSDictionary* firstResponse, NSError* error)
+	[self fetchCommercePagesWithRange:range token:nil purchases:[NSMutableArray array] completion:^(NSArray* purchases, NSDictionary* firstResponse, NSError* error)
 	{
 		__strong typeof(self) self = weakSelf;
 		if (!self)
@@ -142,7 +153,7 @@
 			return;
 		}
 		[self setRunning:NO];
-		[_fetchButton setTitle:@"Commerce History (90d)" forState:UIControlStateNormal];
+		[_fetchButton setTitle:@"Fetch Commerce History" forState:UIControlStateNormal];
 		if (error)
 		{
 			[self setStatus:@"Failed."];
@@ -236,16 +247,16 @@
 	[self setStatus:@"Probing range values…"];
 	NSArray* candidates = @[
 		@"last90Days",
-		@"2024-Jan-01",
-		@"2024-01-01",
-		@"2024-12-31",
-		@"2024",
-		@"allTime",
-		@"last12Months",
-		@"30",
-		@"90",
-		@"365",
-		@"0",
+		@"2026-all",
+		@"2025-all",
+		@"2024-all",
+		@"2023-all",
+		@"2022-all",
+		@"2021-all",
+		@"2020-all",
+		@"1970-all",
+		@"9999-all",
+		@"all-all",
 	];
 	__weak typeof(self) weakSelf = self;
 	[self probeRanges:candidates index:0 completion:^
@@ -297,6 +308,23 @@
 			[self probeRanges:ranges index:index + 1 completion:completion];
 		});
 	}];
+}
+
+- (NSString*)selectedRangeString
+{
+	switch (_rangeControl.selectedSegmentIndex)
+	{
+		case 1:
+			return @"2026-all";
+		case 2:
+			return @"2025-all";
+		case 3:
+			return @"2024-all";
+		case 4:
+			return @"1970-all";
+		default:
+			return @"last90Days";
+	}
 }
 
 - (NSString*)stringFrom:(id)value

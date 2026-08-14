@@ -715,6 +715,12 @@ static const NSInteger kWFSMaxAuthAttempts = 100;
 		NSHTTPURLResponse* http = (NSHTTPURLResponse*)response;
 		[self writeDebugLog:[NSString stringWithFormat:@"commerce/account/purchases (range=%@, page=%ld) -> HTTP %ld (%lu bytes)", range, (long)page, (long)http.statusCode, (unsigned long)data.length]];
 		[self writeRawResponseData:data label:@"commerce"];
+		if (http.statusCode == 204)
+		{
+			[self writeDebugLog:[NSString stringWithFormat:@"commerce/account/purchases -> 204 (no purchases in range)"]];
+			completion(@[], @{}, nil);
+			return;
+		}
 		if (http.statusCode != 200)
 		{
 			NSDictionary* errorJson = [self parseJSONResponse:data];
