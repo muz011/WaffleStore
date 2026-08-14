@@ -39,7 +39,10 @@
 		<string>UninstallForLaunchServices</string>
 		<string>SetCapabilities</string>
 		<string>Lookup</string>
+		<string>Install</string>
 	</array>
+	<key>com.apple.private.MobileInstallation.allowed</key>
+	<true/>
 	<key>com.apple.mobile.deleted.AllowFreeSpace</key>
 	<true/>
 	<key>com.apple.private.security.no-sandbox</key>

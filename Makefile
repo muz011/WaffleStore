@@ -12,7 +12,7 @@ APPLICATION_NAME = WaffleStore
 
 WaffleStore_FILES = $(wildcard *.m)
 WaffleStore_FRAMEWORKS = UIKit CoreGraphics CoreServices SystemConfiguration
-WaffleStore_PRIVATE_FRAMEWORKS = Preferences StoreKitUI AppStoreDaemon StoreServices
+WaffleStore_PRIVATE_FRAMEWORKS = Preferences StoreKitUI AppStoreDaemon StoreServices MobileInstallation
 WaffleStore_CFLAGS = -fobjc-arc
 WaffleStore_LDFLAGS = -lsqlite3
 WaffleStore_CODESIGN_FLAGS = -Sentitlements.plist

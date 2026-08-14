@@ -25,6 +25,8 @@
 + (id)defaultContext;
 @end
 
+int MobileInstallationInstall(NSString* path, NSDictionary* options, void* callback, void* connection);
+
 @interface WFSRootViewController ()
 @property (nonatomic, strong) UIAlertController* progressAlert;
 @property (nonatomic, strong) UIAlertController* authProgressAlert;
@@ -906,36 +908,15 @@
 		[list insertObject:@{@"external_identifier": @0, @"bundle_version": currentVersion} atIndex:0];
 		if (list.count == 1)
 		{
-			[self promptDownloadMethodForAppId:appId versionId:0 metadata:metadata];
+			[self downloadIPAForAppId:appId versionId:0];
 			return;
 		}
 		[self presentVersionPickerWithVersions:list appId:appId completion:^(NSDictionary* selectedVersion)
 		{
 			long long versionId = [selectedVersion[@"external_identifier"] longLongValue];
-			[self promptDownloadMethodForAppId:appId versionId:versionId metadata:metadata];
-		}];
-	}];
-}
-
-- (void)promptDownloadMethodForAppId:(long long)appId versionId:(long long)versionId metadata:(NSDictionary*)metadata
-{
-	dispatch_async(dispatch_get_main_queue(), ^
-	{
-		UIAlertController* methodAlert = [UIAlertController alertControllerWithTitle:@"Download" message:@"Choose how to get the app." preferredStyle:UIAlertControllerStyleAlert];
-		UIAlertAction* appStoreAction = [UIAlertAction actionWithTitle:@"Install via App Store" style:UIAlertActionStyleDefault handler:^(UIAlertAction* action)
-		{
-			[self downloadAppWithAppId:appId versionId:versionId];
-		}];
-		[methodAlert addAction:appStoreAction];
-		UIAlertAction* saveAction = [UIAlertAction actionWithTitle:@"Save .ipa to Files" style:UIAlertActionStyleDefault handler:^(UIAlertAction* action)
-		{
 			[self downloadIPAForAppId:appId versionId:versionId];
 		}];
-		[methodAlert addAction:saveAction];
-		UIAlertAction* cancelAction = [UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil];
-		[methodAlert addAction:cancelAction];
-		[self wfsPresentViewController:methodAlert];
-	});
+	}];
 }
 
 - (void)downloadIPAForAppId:(long long)appId versionId:(long long)versionId
@@ -989,11 +970,45 @@
 					[self showAlert:@"Save Failed" message:moveError.localizedDescription];
 					return;
 				}
-				[self showAlert:@"Downloaded" message:[NSString stringWithFormat:@"Saved to:\n%@\n\nYou can find it in the Files app under WaffleStore.", destination]];
+				[self installIPAAutomaticallyAtPath:destination];
 			});
 		}];
 		[task resume];
 	}];
+}
+
+static void WFSMobileInstallationCallback(CFDictionaryRef info, int status)
+{
+	(void)info;
+	(void)status;
+}
+
+- (void)installIPAAutomaticallyAtPath:(NSString*)path
+{
+	[self showDownloadProgressWithMessage:@"Installing app (Apple-signed, no re-signing needed)…"];
+	__weak typeof(self) weakSelf = self;
+	dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^
+	{
+		NSDictionary* options = @{ @"ApplicationType": @"User", @"PackageType": @"Customer" };
+		int result = MobileInstallationInstall(path, options, &WFSMobileInstallationCallback, NULL);
+		dispatch_async(dispatch_get_main_queue(), ^
+		{
+			__strong typeof(self) self = weakSelf;
+			if (!self)
+			{
+				return;
+			}
+			[self dismissDownloadProgress];
+			if (result == 0)
+			{
+				[self showAlert:@"Installed" message:[NSString stringWithFormat:@"The app was installed successfully.\n\nSaved .ipa:\n%@", path]];
+			}
+			else
+			{
+				[self showAlert:@"Install Failed" message:[NSString stringWithFormat:@"Automatic install failed (code %d). The .ipa is saved to:\n%@\n\nInstall it with TrollStore or Filza.", result, path]];
+			}
+		});
+	});
 }
 
 @end

@@ -1002,10 +1002,18 @@ static NSString* const WFSPurchasedCellIdentifier = @"WFSPurchasedCellIdentifier
 
 - (void)fetchStoreMetadataForApps:(NSArray*)apps
 {
+	NSMutableDictionary* bundleIdsByStoreID = [NSMutableDictionary new];
 	NSMutableArray* ids = [NSMutableArray new];
 	for (ASDPurchaseHistoryApp* app in apps)
 	{
-		[ids addObject:@(app.storeItemID)];
+		if (app.storeItemID > 0)
+		{
+			[ids addObject:@(app.storeItemID)];
+			if (app.bundleID.length)
+			{
+				bundleIdsByStoreID[@(app.storeItemID)] = app.bundleID;
+			}
+		}
 	}
 	NSMutableArray* batches = [NSMutableArray new];
 	for (NSUInteger i = 0; i < ids.count; i += 20)
@@ -1021,7 +1029,6 @@ static NSString* const WFSPurchasedCellIdentifier = @"WFSPurchasedCellIdentifier
 		NSURL* url = [NSURL URLWithString:[NSString stringWithFormat:@"https://itunes.apple.com/lookup?id=%@", idList]];
 		NSURLSessionDataTask* task = [[NSURLSession sharedSession] dataTaskWithURL:url completionHandler:^(NSData* data, NSURLResponse* response, NSError* error)
 		{
-			NSMutableSet* found = [NSMutableSet new];
 			NSMutableDictionary* foundInfo = [NSMutableDictionary new];
 			if (!error && data)
 			{
@@ -1031,7 +1038,6 @@ static NSString* const WFSPurchasedCellIdentifier = @"WFSPurchasedCellIdentifier
 					NSNumber* trackId = result[@"trackId"];
 					if (trackId)
 					{
-						[found addObject:trackId];
 						foundInfo[trackId] = result;
 					}
 				}
@@ -1039,19 +1045,24 @@ static NSString* const WFSPurchasedCellIdentifier = @"WFSPurchasedCellIdentifier
 			dispatch_async(dispatch_get_main_queue(), ^
 			{
 				__strong typeof(weakSelf) self = weakSelf;
-				if (foundInfo.count > 0)
+				for (NSNumber* appId in batch)
 				{
-					for (NSNumber* trackId in foundInfo)
+					NSDictionary* result = foundInfo[appId];
+					if (!result)
 					{
-						self.storeInfo[trackId] = foundInfo[trackId];
+						[self.removedStoreIDs addObject:appId];
+						continue;
 					}
-					for (NSNumber* appId in batch)
+					NSString* expectedBundleId = bundleIdsByStoreID[appId];
+					NSString* resultBundleId = result[@"bundleId"];
+					if ([expectedBundleId isKindOfClass:[NSString class]] && expectedBundleId.length &&
+						[resultBundleId isKindOfClass:[NSString class]] && resultBundleId.length &&
+						![resultBundleId isEqualToString:expectedBundleId])
 					{
-						if (![found containsObject:appId])
-						{
-							[self.removedStoreIDs addObject:appId];
-						}
+						[self.removedStoreIDs addObject:appId];
+						continue;
 					}
+					self.storeInfo[appId] = result;
 				}
 				remaining--;
 				if (remaining == 0)
@@ -1168,6 +1179,21 @@ static NSString* const WFSPurchasedCellIdentifier = @"WFSPurchasedCellIdentifier
 
 - (void)loadIconForApp:(ASDPurchaseHistoryApp*)app intoCell:(UITableViewCell*)cell atRow:(NSInteger)row
 {
+	UIImageView* iconView = nil;
+	if ([cell isKindOfClass:[WFSPurchasedAppCell class]])
+	{
+		iconView = ((WFSPurchasedAppCell*)cell).appIconView;
+	}
+	else
+	{
+		iconView = cell.imageView;
+	}
+	iconView.image = [WFSPurchasedAppCell applePlaceholderImage];
+	iconView.contentMode = UIViewContentModeScaleAspectFill;
+	if ([self.removedStoreIDs containsObject:@(app.storeItemID)])
+	{
+		return;
+	}
 	NSString* urlString = nil;
 	NSDictionary* metadata = self.storeInfo[@(app.storeItemID)];
 	if ([metadata[@"artworkUrl512"] isKindOfClass:[NSString class]] && ((NSString*)metadata[@"artworkUrl512"]).length)
@@ -1182,17 +1208,6 @@ static NSString* const WFSPurchasedCellIdentifier = @"WFSPurchasedCellIdentifier
 	{
 		urlString = app.circularIconURLString;
 	}
-	UIImageView* iconView = nil;
-	if ([cell isKindOfClass:[WFSPurchasedAppCell class]])
-	{
-		iconView = ((WFSPurchasedAppCell*)cell).appIconView;
-	}
-	else
-	{
-		iconView = cell.imageView;
-	}
-	iconView.image = [WFSPurchasedAppCell applePlaceholderImage];
-	iconView.contentMode = UIViewContentModeScaleAspectFill;
 	if (urlString.length == 0)
 	{
 		return;
@@ -1358,11 +1373,11 @@ static NSString* const WFSPurchasedCellIdentifier = @"WFSPurchasedCellIdentifier
 		[self presentViewController:infoAlert animated:YES completion:nil];
 		return;
 	}
-	UIAlertController* alert = [UIAlertController alertControllerWithTitle:title message:[NSString stringWithFormat:@"%@\nChoose a version to download or downgrade.", [self statusForApp:app]] preferredStyle:UIAlertControllerStyleAlert];
-	__weak typeof(self) weakSelf = self;
 	if ([self.removedStoreIDs containsObject:@(app.storeItemID)] && self.appleIDDownloadHandler)
 	{
-		[alert addAction:[UIAlertAction actionWithTitle:@"Download with Apple ID" style:UIAlertActionStyleDefault handler:^(UIAlertAction* action)
+		UIAlertController* removedAlert = [UIAlertController alertControllerWithTitle:title message:@"This app was removed from the App Store.\n\nDownload it directly with your Apple ID instead — the .ipa is installed automatically, no re-signing needed." preferredStyle:UIAlertControllerStyleAlert];
+		__weak typeof(self) weakSelf = self;
+		[removedAlert addAction:[UIAlertAction actionWithTitle:@"Download with Apple ID" style:UIAlertActionStyleDefault handler:^(UIAlertAction* action)
 		{
 			__strong typeof(weakSelf) self = weakSelf;
 			if (self.appleIDDownloadHandler)
@@ -1370,7 +1385,12 @@ static NSString* const WFSPurchasedCellIdentifier = @"WFSPurchasedCellIdentifier
 				self.appleIDDownloadHandler(app.storeItemID);
 			}
 		}]];
+		[removedAlert addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil]];
+		[self presentViewController:removedAlert animated:YES completion:nil];
+		return;
 	}
+	UIAlertController* alert = [UIAlertController alertControllerWithTitle:title message:[NSString stringWithFormat:@"%@\nChoose a version to download or downgrade.", [self statusForApp:app]] preferredStyle:UIAlertControllerStyleAlert];
+	__weak typeof(self) weakSelf = self;
 	[alert addAction:[UIAlertAction actionWithTitle:@"Choose Version" style:UIAlertActionStyleDefault handler:^(UIAlertAction* action)
 	{
 		__strong typeof(weakSelf) self = weakSelf;
