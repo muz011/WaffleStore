@@ -3,6 +3,7 @@
 #import "WFSAppleIDDownloader.h"
 #import "CoreServices.h"
 #import <SystemConfiguration/SystemConfiguration.h>
+#import <dlfcn.h>
 
 @interface SKUIItemStateCenter : NSObject
 
@@ -25,7 +26,7 @@
 + (id)defaultContext;
 @end
 
-int MobileInstallationInstall(NSString* path, NSDictionary* options, void* callback, void* connection);
+typedef int (*WFSMobileInstallationInstallFunction)(NSString* path, NSDictionary* options, void* callback, void* connection);
 
 @interface WFSRootViewController ()
 @property (nonatomic, strong) UIAlertController* progressAlert;
@@ -983,14 +984,35 @@ static void WFSMobileInstallationCallback(CFDictionaryRef info, int status)
 	(void)status;
 }
 
+- (WFSMobileInstallationInstallFunction)mobileInstallationInstallFunction
+{
+	static WFSMobileInstallationInstallFunction installFunction;
+	static dispatch_once_t onceToken;
+	dispatch_once(&onceToken, ^
+	{
+		void* handle = dlopen("/System/Library/PrivateFrameworks/MobileInstallation.framework/MobileInstallation", RTLD_LAZY);
+		if (handle)
+		{
+			installFunction = (WFSMobileInstallationInstallFunction)dlsym(handle, "MobileInstallationInstall");
+		}
+	});
+	return installFunction;
+}
+
 - (void)installIPAAutomaticallyAtPath:(NSString*)path
 {
+	WFSMobileInstallationInstallFunction installFunction = [self mobileInstallationInstallFunction];
+	if (!installFunction)
+	{
+		[self showAlert:@"Install Unavailable" message:[NSString stringWithFormat:@"The system installer is not available on this device. The .ipa is saved to:\n%@\n\nInstall it with TrollStore or Filza.", path]];
+		return;
+	}
 	[self showDownloadProgressWithMessage:@"Installing app (Apple-signed, no re-signing needed)…"];
 	__weak typeof(self) weakSelf = self;
 	dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^
 	{
 		NSDictionary* options = @{ @"ApplicationType": @"User", @"PackageType": @"Customer" };
-		int result = MobileInstallationInstall(path, options, &WFSMobileInstallationCallback, NULL);
+		int result = installFunction(path, options, &WFSMobileInstallationCallback, NULL);
 		dispatch_async(dispatch_get_main_queue(), ^
 		{
 			__strong typeof(self) self = weakSelf;
