@@ -116,11 +116,12 @@ static NSInteger WFSSpawnRootWithTimeout(NSArray* arguments, NSTimeInterval time
 		return -200;
 	}
 	close(outPipe[1]);
+	int readFd = outPipe[0];
 	NSLock* outputLock = [NSLock new];
 	NSMutableString* collected = [NSMutableString string];
 	dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^
 	{
-		int fd = outPipe[0];
+		int fd = readFd;
 		char buffer[4096];
 		ssize_t bytesRead = 0;
 		while ((bytesRead = read(fd, buffer, sizeof(buffer))) > 0)
