@@ -5,3 +5,15 @@ output/
 *.ipa
 .DS_Store
 dist/
+bag.xml
+fast*.bin
+fast*.txt
+fast*.xml
+legacy_*.txt
+legacy_*.bin
+*.ips
+WaffleStore_appleid.log
+WaffleStore_install.log
+prev.md
+session-*.md
+*_Full.txt
