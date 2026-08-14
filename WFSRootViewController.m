@@ -4,6 +4,64 @@
 #import "CoreServices.h"
 #import <SystemConfiguration/SystemConfiguration.h>
 #import <zlib.h>
+#import <spawn.h>
+#import <string.h>
+#import <sys/wait.h>
+#import <sys/types.h>
+#import <signal.h>
+#import <time.h>
+
+extern char** environ;
+
+static BOOL WFSSpawnWithTimeout(NSArray* arguments, NSTimeInterval timeout, BOOL* cancelled)
+{
+	NSMutableArray* allArguments = [NSMutableArray arrayWithArray:arguments];
+	[allArguments insertObject:arguments.firstObject atIndex:0];
+	NSMutableArray* cStrings = [NSMutableArray arrayWithCapacity:allArguments.count];
+	char** argv = calloc(allArguments.count + 1, sizeof(char*));
+	if (!argv)
+	{
+		return NO;
+	}
+	for (NSUInteger i = 0; i < allArguments.count; i++)
+	{
+		NSString* argument = allArguments[i];
+		char* copy = strdup(argument.UTF8String);
+		[cStrings addObject:[NSData dataWithBytes:copy length:strlen(copy) + 1]];
+		argv[i] = copy;
+	}
+	argv[allArguments.count] = NULL;
+	pid_t pid = 0;
+	int spawnResult = posix_spawn(&pid, argv[0], NULL, NULL, argv, environ);
+	if (spawnResult != 0)
+	{
+		free(argv);
+		return NO;
+	}
+	struct timespec sleepTime = { 0, 100 * 1000 * 1000 };
+	int status = 0;
+	NSTimeInterval start = [NSProcessInfo processInfo].systemUptime;
+	while (waitpid(pid, &status, WNOHANG) == 0)
+	{
+		if (cancelled && *cancelled)
+		{
+			kill(pid, SIGKILL);
+			waitpid(pid, &status, 0);
+			free(argv);
+			return NO;
+		}
+		if ([NSProcessInfo processInfo].systemUptime - start > timeout)
+		{
+			kill(pid, SIGKILL);
+			waitpid(pid, &status, 0);
+			free(argv);
+			return NO;
+		}
+		nanosleep(&sleepTime, NULL);
+	}
+	free(argv);
+	return WIFEXITED(status) && WEXITSTATUS(status) == 0;
+}
 
 @interface LSApplicationWorkspace (WFSManualInstall)
 - (void)_LSPrivateRebuildApplicationDatabasesForSystemApps:(_Bool)systemApps;
@@ -374,6 +432,48 @@
 			[self.progressAlert dismissViewControllerAnimated:YES completion:nil];
 			self.progressAlert = nil;
 			self.downloadProgressView = nil;
+		}
+	});
+}
+
+- (void)showInstallProgressWithMessage:(NSString*)message cancelHandler:(void (^)(void))cancelHandler
+{
+	dispatch_async(dispatch_get_main_queue(), ^
+	{
+		if (self.progressAlert)
+		{
+			self.progressAlert.title = @"Installing";
+			self.progressAlert.message = message;
+			return;
+		}
+		self.progressAlert = [UIAlertController alertControllerWithTitle:@"Installing" message:message preferredStyle:UIAlertControllerStyleAlert];
+		UIActivityIndicatorView* indicator = [[UIActivityIndicatorView alloc] initWithActivityIndicatorStyle:UIActivityIndicatorViewStyleMedium];
+		indicator.translatesAutoresizingMaskIntoConstraints = NO;
+		indicator.tag = 4242;
+		[indicator startAnimating];
+		[self.progressAlert.view addSubview:indicator];
+		[NSLayoutConstraint activateConstraints:@[
+			[indicator.centerXAnchor constraintEqualToAnchor:self.progressAlert.view.centerXAnchor],
+			[indicator.bottomAnchor constraintEqualToAnchor:self.progressAlert.view.bottomAnchor constant:-20]
+		]];
+		if (cancelHandler)
+		{
+			[self.progressAlert addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:^(UIAlertAction* action)
+			{
+				cancelHandler();
+			}]];
+		}
+		[self wfsPresentViewController:self.progressAlert];
+	});
+}
+
+- (void)updateInstallProgressMessage:(NSString*)message
+{
+	dispatch_async(dispatch_get_main_queue(), ^
+	{
+		if (self.progressAlert)
+		{
+			self.progressAlert.message = message;
 		}
 	});
 }
@@ -1096,42 +1196,110 @@
 
 - (void)installIPAAutomaticallyAtPath:(NSString*)path
 {
-	[self showDownloadProgressWithMessage:@"Preparing app for install…"];
+	__block BOOL cancelled = NO;
+	__block BOOL finished = NO;
+	[self showInstallProgressWithMessage:@"Preparing app for install…" cancelHandler:^
+	{
+		cancelled = YES;
+	}];
 	__weak typeof(self) weakSelf = self;
 	dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^
 	{
+		__strong typeof(self) self = weakSelf;
+		if (!self)
+		{
+			return;
+		}
+		[self updateInstallProgressMessage:@"Extracting app bundle…"];
 		NSError* error = nil;
-		NSString* extractedAppPath = [self extractAppBundleFromIPAAtPath:path error:&error];
+		NSString* extractedAppPath = [self extractAppBundleFromIPAAtPath:path progress:^(NSUInteger completed, NSUInteger total)
+		{
+			if (completed == 0 || completed == total || completed % 10 == 0)
+			{
+				[self updateInstallProgressMessage:[NSString stringWithFormat:@"Extracting app bundle… (%lu of %lu files)", (unsigned long)completed, (unsigned long)total]];
+			}
+		} cancelFlag:&cancelled error:&error];
+		if (cancelled)
+		{
+			[self finishInstallWithMessage:[NSString stringWithFormat:@"Install cancelled. The .ipa is saved to:\n%@", path] title:@"Cancelled" path:path finished:&finished];
+			return;
+		}
 		if (!extractedAppPath)
 		{
-			dispatch_async(dispatch_get_main_queue(), ^
-			{
-				[self dismissDownloadProgress];
-				[self showAlert:@"Install Failed" message:[NSString stringWithFormat:@"Could not extract the .ipa (%@). The .ipa is saved to:\n%@\n\nInstall it with TrollStore or Filza.", error.localizedDescription, path]];
-			});
+			[self finishInstallWithMessage:[NSString stringWithFormat:@"Could not extract the .ipa (%@). The .ipa is saved to:\n%@\n\nInstall it with TrollStore or Filza.", error.localizedDescription, path] title:@"Install Failed" path:path finished:&finished];
 			return;
 		}
+		if (cancelled)
+		{
+			[self finishInstallWithMessage:[NSString stringWithFormat:@"Install cancelled. The .ipa is saved to:\n%@", path] title:@"Cancelled" path:path finished:&finished];
+			return;
+		}
+		[self updateInstallProgressMessage:@"Copying app bundle…"];
 		NSString* installedPath = [self copyAppBundleToSystemAtPath:extractedAppPath error:&error];
 		[[NSFileManager defaultManager] removeItemAtPath:[extractedAppPath stringByDeletingLastPathComponent] error:nil];
-		if (!installedPath)
+		if (cancelled)
 		{
-			dispatch_async(dispatch_get_main_queue(), ^
-			{
-				[self dismissDownloadProgress];
-				[self showAlert:@"Install Failed" message:[NSString stringWithFormat:@"Could not install the app (%@). The .ipa is saved to:\n%@\n\nInstall it with TrollStore or Filza.", error.localizedDescription, path]];
-			});
+			[self finishInstallWithMessage:[NSString stringWithFormat:@"Install cancelled. The .ipa is saved to:\n%@", path] title:@"Cancelled" path:path finished:&finished];
 			return;
 		}
-		[[LSApplicationWorkspace defaultWorkspace] _LSPrivateRebuildApplicationDatabasesForSystemApps:NO];
-		dispatch_async(dispatch_get_main_queue(), ^
+		if (!installedPath)
+		{
+			[self finishInstallWithMessage:[NSString stringWithFormat:@"Could not install the app (%@). The .ipa is saved to:\n%@\n\nInstall it with TrollStore or Filza.", error.localizedDescription, path] title:@"Install Failed" path:path finished:&finished];
+			return;
+		}
+		[self updateInstallProgressMessage:@"Registering app with the system…"];
+		[self registerAppBundleAtPath:installedPath cancelFlag:&cancelled];
+		if (cancelled)
+		{
+			[self finishInstallWithMessage:[NSString stringWithFormat:@"Install cancelled. The .ipa is saved to:\n%@", path] title:@"Cancelled" path:path finished:&finished];
+			return;
+		}
+		[self finishInstallWithMessage:[NSString stringWithFormat:@"The app was installed successfully.\n\nSaved .ipa:\n%@", path] title:@"Installed" path:path finished:&finished];
+	});
+	dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(180 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^
+	{
+		if (!finished)
 		{
 			[self dismissDownloadProgress];
-			[self showAlert:@"Installed" message:[NSString stringWithFormat:@"The app was installed successfully.\n\nSaved .ipa:\n%@", path]];
-		});
+			[self showAlert:@"Install Taking Too Long" message:[NSString stringWithFormat:@"The install did not finish in time. The .ipa is saved to:\n%@\n\nYou can install it with TrollStore or Filza, or try again.", path]];
+		}
 	});
 }
 
-- (NSString*)extractAppBundleFromIPAAtPath:(NSString*)ipaPath error:(NSError**)error
+- (void)finishInstallWithMessage:(NSString*)message title:(NSString*)title path:(NSString*)path finished:(BOOL*)finished
+{
+	*finished = YES;
+	dispatch_async(dispatch_get_main_queue(), ^
+	{
+		[self dismissDownloadProgress];
+		[self showAlert:title message:message];
+	});
+}
+
+- (BOOL)registerAppBundleAtPath:(NSString*)appPath cancelFlag:(BOOL*)cancelled
+{
+	NSArray* uicacheCandidates = @[ @"/var/jb/usr/bin/uicache", @"/usr/bin/uicache", @"/usr/local/bin/uicache" ];
+	for (NSString* uicache in uicacheCandidates)
+	{
+		if (![[NSFileManager defaultManager] isExecutableFileAtPath:uicache])
+		{
+			continue;
+		}
+		BOOL succeeded = WFSSpawnWithTimeout(@[ uicache, @"-p", appPath ], 30.0, cancelled);
+		if (succeeded)
+		{
+			return YES;
+		}
+		if (cancelled && *cancelled)
+		{
+			return NO;
+		}
+	}
+	[[LSApplicationWorkspace defaultWorkspace] _LSPrivateRebuildApplicationDatabasesForSystemApps:NO];
+	return YES;
+}
+
+- (NSString*)extractAppBundleFromIPAAtPath:(NSString*)ipaPath progress:(void (^)(NSUInteger completed, NSUInteger total))progressHandler cancelFlag:(BOOL*)cancelled error:(NSError**)error
 {
 	NSDictionary* attributes = [[NSFileManager defaultManager] attributesOfItemAtPath:ipaPath error:nil];
 	unsigned long long fileSize = [attributes[NSFileSize] unsignedLongLongValue];
@@ -1148,10 +1316,26 @@
 	[handle seekToFileOffset:searchFrom];
 	NSData* tail = [handle readDataToEndOfFile];
 	const uint8_t* tailBytes = tail.bytes;
-	NSInteger eocd = -1;
+	NSMutableArray* eocdCandidates = [NSMutableArray array];
 	for (NSInteger i = (NSInteger)tail.length - 22; i >= 0; i--)
 	{
 		if (tailBytes[i] == 0x50 && tailBytes[i + 1] == 0x4B && tailBytes[i + 2] == 0x05 && tailBytes[i + 3] == 0x06)
+		{
+			[eocdCandidates addObject:@(i)];
+		}
+	}
+	NSInteger eocd = -1;
+	for (NSNumber* candidate in eocdCandidates)
+	{
+		NSInteger i = candidate.integerValue;
+		if (i + 22 > tail.length)
+		{
+			continue;
+		}
+		uint16_t entryCount = tailBytes[i + 10] | (tailBytes[i + 11] << 8);
+		uint32_t cdSize = (uint32_t)(tailBytes[i + 12] | (tailBytes[i + 13] << 8) | (tailBytes[i + 14] << 16) | (tailBytes[i + 15] << 24));
+		uint32_t cdOffset = (uint32_t)(tailBytes[i + 16] | (tailBytes[i + 17] << 8) | (tailBytes[i + 18] << 16) | (tailBytes[i + 19] << 24));
+		if (cdSize > 0 && (uint64_t)cdOffset + cdSize <= fileSize && entryCount > 0 && entryCount <= cdSize / 46 + 1)
 		{
 			eocd = i;
 			break;
@@ -1235,8 +1419,16 @@
 		return nil;
 	}
 	BOOL extractedAll = YES;
+	NSUInteger entryIndex = 0;
+	NSUInteger totalEntries = fileEntries.count;
 	for (NSDictionary* entry in fileEntries)
 	{
+		if (cancelled && *cancelled)
+		{
+			extractedAll = NO;
+			break;
+		}
+		entryIndex++;
 		NSString* entryName = entry[@"name"];
 		NSString* relativePath = [entryName substringFromIndex:appDirectoryName.length];
 		if (relativePath.length == 0)
@@ -1298,12 +1490,16 @@
 			extractedAll = NO;
 			break;
 		}
+		if (progressHandler)
+		{
+			progressHandler(entryIndex, totalEntries);
+		}
 	}
 	[readHandle closeFile];
 	if (!extractedAll)
 	{
 		[[NSFileManager defaultManager] removeItemAtPath:outputRoot error:nil];
-		if (error)
+		if (error && !(cancelled && *cancelled))
 		{
 			*error = [NSError errorWithDomain:NSCocoaErrorDomain code:NSFileReadCorruptFileError userInfo:@{NSLocalizedDescriptionKey: @"could not extract the app bundle"}];
 		}
