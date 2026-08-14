@@ -1293,7 +1293,7 @@ static NSInteger WFSSpawnRootWithTimeout(NSArray* arguments, NSTimeInterval time
 			[self showAlert:@"Save Failed" message:moveError.localizedDescription];
 			return;
 		}
-		[self installIPAAutomaticallyAtPath:destination];
+		[self verifyAndInstallIPAAtPath:destination];
 	});
 }
 
@@ -1325,6 +1325,405 @@ static NSInteger WFSSpawnRootWithTimeout(NSArray* arguments, NSTimeInterval time
 	NSString* directory = [[NSHomeDirectory() stringByAppendingPathComponent:@"Documents"] stringByAppendingPathComponent:@"Downgrades"];
 	[[NSFileManager defaultManager] createDirectoryAtPath:directory withIntermediateDirectories:YES attributes:nil error:nil];
 	return [directory stringByAppendingPathComponent:filename];
+}
+
+- (NSDictionary*)verifyIPAAtPath:(NSString*)path
+{
+	NSDictionary* attributes = [[NSFileManager defaultManager] attributesOfItemAtPath:path error:nil];
+	if (!attributes)
+	{
+		return @{@"error": @"file not found"};
+	}
+	unsigned long long fileSize = [attributes[NSFileSize] unsignedLongLongValue];
+	if (fileSize < 22)
+	{
+		return @{@"error": @"file is too small to be an .ipa"};
+	}
+	NSFileHandle* handle = [NSFileHandle fileHandleForReadingAtPath:path];
+	if (!handle)
+	{
+		return @{@"error": @"cannot open the file"};
+	}
+	unsigned long long searchFrom = fileSize > 70000 ? fileSize - 70000 : 0;
+	[handle seekToFileOffset:searchFrom];
+	NSData* tail = [handle readDataToEndOfFile];
+	const uint8_t* tailBytes = tail.bytes;
+	NSInteger eocd = -1;
+	for (NSInteger i = (NSInteger)tail.length - 22; i >= 0; i--)
+	{
+		if (tailBytes[i] == 0x50 && tailBytes[i + 1] == 0x4B && tailBytes[i + 2] == 0x05 && tailBytes[i + 3] == 0x06)
+		{
+			NSInteger candidate = i;
+			if (candidate + 22 > tail.length)
+			{
+				continue;
+			}
+			uint16_t entryCount = tailBytes[candidate + 10] | (tailBytes[candidate + 11] << 8);
+			uint32_t cdSize = (uint32_t)(tailBytes[candidate + 12] | (tailBytes[candidate + 13] << 8) | (tailBytes[candidate + 14] << 16) | (tailBytes[candidate + 15] << 24));
+			uint32_t cdOffset = (uint32_t)(tailBytes[candidate + 16] | (tailBytes[candidate + 17] << 8) | (tailBytes[candidate + 18] << 16) | (tailBytes[candidate + 19] << 24));
+			if (cdSize > 0 && (uint64_t)cdOffset + cdSize <= fileSize && entryCount > 0 && entryCount <= cdSize / 46 + 1)
+			{
+				eocd = candidate;
+				break;
+			}
+		}
+	}
+	if (eocd < 0)
+	{
+		[handle closeFile];
+		return @{@"error": @"not a valid zip archive"};
+	}
+	uint16_t entryCount = tailBytes[eocd + 10] | (tailBytes[eocd + 11] << 8);
+	uint32_t cdSize = (uint32_t)(tailBytes[eocd + 12] | (tailBytes[eocd + 13] << 8) | (tailBytes[eocd + 14] << 16) | (tailBytes[eocd + 15] << 24));
+	uint32_t cdOffset = (uint32_t)(tailBytes[eocd + 16] | (tailBytes[eocd + 17] << 8) | (tailBytes[eocd + 18] << 16) | (tailBytes[eocd + 19] << 24));
+	[handle seekToFileOffset:cdOffset];
+	NSMutableData* centralData = [NSMutableData data];
+	while (centralData.length < cdSize)
+	{
+		NSData* chunk = [handle readDataOfLength:(NSUInteger)(cdSize - (uint32_t)centralData.length)];
+		if (chunk.length == 0)
+		{
+			break;
+		}
+		[centralData appendData:chunk];
+	}
+	const uint8_t* cd = centralData.bytes;
+	NSInteger centralLength = centralData.length;
+	NSMutableDictionary* entries = [NSMutableDictionary dictionary];
+	NSString* appDirectoryName = nil;
+	NSInteger pos = 0;
+	for (uint16_t i = 0; i < entryCount && pos + 46 <= centralLength; i++)
+	{
+		if (cd[pos] != 0x50 || cd[pos + 1] != 0x4B || cd[pos + 2] != 0x01 || cd[pos + 3] != 0x02)
+		{
+			break;
+		}
+		uint16_t method = cd[pos + 10] | (cd[pos + 11] << 8);
+		uint32_t compSize = (uint32_t)(cd[pos + 20] | (cd[pos + 21] << 8) | (cd[pos + 22] << 16) | (cd[pos + 23] << 24));
+		uint16_t nameLength = cd[pos + 28] | (cd[pos + 29] << 8);
+		uint16_t extraLength = cd[pos + 30] | (cd[pos + 31] << 8);
+		uint16_t commentLength = cd[pos + 32] | (cd[pos + 33] << 8);
+		uint32_t localOffset = (uint32_t)(cd[pos + 42] | (cd[pos + 43] << 8) | (cd[pos + 44] << 16) | (cd[pos + 45] << 24));
+		NSString* name = [[NSString alloc] initWithBytes:(cd + pos + 46) length:nameLength encoding:NSUTF8StringEncoding];
+		pos += 46 + nameLength + extraLength + commentLength;
+		if (name.length == 0 || [name hasPrefix:@"__MACOSX"])
+		{
+			continue;
+		}
+		if (!appDirectoryName && [name hasPrefix:@"Payload/"] && [name hasSuffix:@"/"] && [name rangeOfString:@"/" options:0 range:NSMakeRange(0, name.length - 1)].location == 7)
+		{
+			appDirectoryName = name;
+		}
+		entries[name] = @{ @"method": @(method), @"compSize": @(compSize), @"localOffset": @(localOffset) };
+	}
+	if (!appDirectoryName)
+	{
+		[handle closeFile];
+		return @{@"error": @"no Payload/*.app found inside the .ipa"};
+	}
+	NSString* infoPlistName = [appDirectoryName stringByAppendingString:@"Info.plist"];
+	NSDictionary* infoEntry = entries[infoPlistName];
+	if (!infoEntry)
+	{
+		[handle closeFile];
+		return @{@"error": @"missing Info.plist in the app bundle"};
+	}
+	NSData* infoData = [self zipEntryDataFromHandle:handle entry:infoEntry];
+	if (!infoData)
+	{
+		[handle closeFile];
+		return @{@"error": @"could not read Info.plist"};
+	}
+	NSError* plistError = nil;
+	NSPropertyListFormat format = NSPropertyListBinaryFormat_v1_0;
+	NSDictionary* info = [NSPropertyListSerialization propertyListWithData:infoData options:0 format:&format error:&plistError];
+	if (![info isKindOfClass:[NSDictionary class]])
+	{
+		[handle closeFile];
+		return @{@"error": @"Info.plist is not a valid property list"};
+	}
+	NSString* executableName = info[@"CFBundleExecutable"];
+	if (![executableName isKindOfClass:[NSString class]] || executableName.length == 0)
+	{
+		[handle closeFile];
+		return @{@"error": @"Info.plist has no CFBundleExecutable"};
+	}
+	NSDictionary* execEntry = entries[[appDirectoryName stringByAppendingString:executableName]];
+	if (!execEntry)
+	{
+		[handle closeFile];
+		return @{@"error": [NSString stringWithFormat:@"main executable (%@) is missing from the .ipa", executableName]};
+	}
+	NSData* execHeader = [self zipEntryPrefixDataFromHandle:handle entry:execEntry length:4096];
+	[handle closeFile];
+	if (!execHeader || execHeader.length < 4)
+	{
+		return @{@"error": @"could not read the main executable header"};
+	}
+	NSUInteger readLength = 4096;
+	NSNumber* cryptid = nil;
+	for (int attempt = 0; attempt < 3 && !cryptid; attempt++)
+	{
+		cryptid = [self cryptidFromMachOHeader:execHeader];
+		if (!cryptid && [self isFatMachOHeader:execHeader])
+		{
+			readLength *= 4;
+			NSFileHandle* reopenHandle = [NSFileHandle fileHandleForReadingAtPath:path];
+			if (!reopenHandle)
+			{
+				break;
+			}
+			execHeader = [self zipEntryPrefixDataFromHandle:reopenHandle entry:execEntry length:readLength];
+			[reopenHandle closeFile];
+			if (!execHeader || execHeader.length < 4)
+			{
+				break;
+			}
+		}
+	}
+	if (!cryptid)
+	{
+		return @{@"error": @"main executable is not a valid Mach-O binary"};
+	}
+	return cryptid.boolValue ? @{@"encrypted": @YES} : nil;
+}
+
+static uint32_t wfsUInt32(const uint8_t* bytes)
+{
+	return (uint32_t)(bytes[0] | (bytes[1] << 8) | (bytes[2] << 16) | (bytes[3] << 24));
+}
+
+- (BOOL)isFatMachOHeader:(NSData*)header
+{
+	if (header.length < 4)
+	{
+		return NO;
+	}
+	return wfsUInt32(header.bytes) == 0xCAFEBABE;
+}
+
+- (NSNumber*)cryptidFromMachOHeader:(NSData*)header
+{
+	if (header.length < 4)
+	{
+		return nil;
+	}
+	const uint8_t* mh = header.bytes;
+	uint32_t magic = wfsUInt32(mh);
+	if (magic == 0xFEEDFACF)
+	{
+		if (header.length < 32)
+		{
+			return nil;
+		}
+		uint32_t ncmds = wfsUInt32(mh + 16);
+		NSUInteger off = 32;
+		for (uint32_t i = 0; i < ncmds && off + 8 <= header.length; i++)
+		{
+			uint32_t cmd = wfsUInt32(mh + off);
+			uint32_t cmdSize = wfsUInt32(mh + off + 4);
+			if (cmd == 0x2C && off + 20 <= header.length)
+			{
+				return @(wfsUInt32(mh + off + 16) != 0);
+			}
+			if (cmdSize == 0)
+			{
+				break;
+			}
+			off += cmdSize;
+		}
+		return @NO;
+	}
+	if (magic == 0xFEEDFACE)
+	{
+		if (header.length < 28)
+		{
+			return nil;
+		}
+		uint32_t ncmds = wfsUInt32(mh + 16);
+		NSUInteger off = 28;
+		for (uint32_t i = 0; i < ncmds && off + 8 <= header.length; i++)
+		{
+			uint32_t cmd = wfsUInt32(mh + off);
+			uint32_t cmdSize = wfsUInt32(mh + off + 4);
+			if (cmd == 0x21 && off + 12 <= header.length)
+			{
+				return @(wfsUInt32(mh + off + 8) != 0);
+			}
+			if (cmdSize == 0)
+			{
+				break;
+			}
+			off += cmdSize;
+		}
+		return @NO;
+	}
+	if (magic == 0xCAFEBABE)
+	{
+		if (header.length < 8)
+		{
+			return nil;
+		}
+		uint32_t nfat = wfsUInt32(mh + 4);
+		if (nfat == 0 || nfat > 64)
+		{
+			return nil;
+		}
+		NSUInteger off = 8;
+		for (uint32_t i = 0; i < nfat; i++)
+		{
+			if (off + 20 > header.length)
+			{
+				return nil;
+			}
+			uint32_t cpuType = wfsUInt32(mh + off);
+			uint32_t fileOff = wfsUInt32(mh + off + 8);
+			if (cpuType == 0x0100000C && fileOff > 0 && fileOff < header.length)
+			{
+				return [self cryptidFromMachOHeader:[header subdataWithRange:NSMakeRange(fileOff, header.length - fileOff)]];
+			}
+			off += 20;
+		}
+		return nil;
+	}
+	return nil;
+}
+
+- (NSData*)zipEntryDataFromHandle:(NSFileHandle*)handle entry:(NSDictionary*)entry
+{
+	uint32_t localOffset = [entry[@"localOffset"] unsignedIntValue];
+	[handle seekToFileOffset:localOffset];
+	NSData* localHeader = [handle readDataOfLength:30];
+	if (localHeader.length < 30)
+	{
+		return nil;
+	}
+	const uint8_t* lh = localHeader.bytes;
+	uint16_t localNameLength = lh[26] | (lh[27] << 8);
+	uint16_t localExtraLength = lh[28] | (lh[29] << 8);
+	[handle seekToFileOffset:localOffset + 30 + localNameLength + localExtraLength];
+	uint32_t compSize = [entry[@"compSize"] unsignedIntValue];
+	NSData* compressed = [handle readDataOfLength:compSize];
+	if (compressed.length != compSize)
+	{
+		return nil;
+	}
+	if ([entry[@"method"] unsignedShortValue] == 0)
+	{
+		return compressed;
+	}
+	return [self zipInflateData:compressed];
+}
+
+- (NSData*)zipEntryPrefixDataFromHandle:(NSFileHandle*)handle entry:(NSDictionary*)entry length:(NSUInteger)length
+{
+	uint32_t localOffset = [entry[@"localOffset"] unsignedIntValue];
+	[handle seekToFileOffset:localOffset];
+	NSData* localHeader = [handle readDataOfLength:30];
+	if (localHeader.length < 30)
+	{
+		return nil;
+	}
+	const uint8_t* lh = localHeader.bytes;
+	uint16_t localNameLength = lh[26] | (lh[27] << 8);
+	uint16_t localExtraLength = lh[28] | (lh[29] << 8);
+	[handle seekToFileOffset:localOffset + 30 + localNameLength + localExtraLength];
+	uint32_t compSize = [entry[@"compSize"] unsignedIntValue];
+	if ([entry[@"method"] unsignedShortValue] == 0)
+	{
+		return [handle readDataOfLength:(NSUInteger)MIN(compSize, (uint32_t)length)];
+	}
+	NSMutableData* inflated = [NSMutableData data];
+	z_stream stream;
+	memset(&stream, 0, sizeof(stream));
+	if (inflateInit2(&stream, -MAX_WBITS) != Z_OK)
+	{
+		return nil;
+	}
+	uint8_t inBuffer[65536];
+	uint8_t outBuffer[65536];
+	uint32_t remaining = compSize;
+	int ret = Z_OK;
+	BOOL done = NO;
+	while (remaining > 0 && !done)
+	{
+		NSData* chunk = [handle readDataOfLength:(NSUInteger)MIN(remaining, (uint32_t)sizeof(inBuffer))];
+		if (chunk.length == 0)
+		{
+			break;
+		}
+		remaining -= (uint32_t)chunk.length;
+		stream.next_in = (Bytef*)chunk.bytes;
+		stream.avail_in = (uInt)chunk.length;
+		do
+		{
+			stream.next_out = outBuffer;
+			stream.avail_out = sizeof(outBuffer);
+			ret = inflate(&stream, Z_NO_FLUSH);
+			if (ret != Z_OK && ret != Z_STREAM_END)
+			{
+				done = YES;
+				break;
+			}
+			[inflated appendBytes:outBuffer length:sizeof(outBuffer) - stream.avail_out];
+			if (inflated.length >= length)
+			{
+				done = YES;
+				break;
+			}
+		} while (stream.avail_out == 0);
+	}
+	inflateEnd(&stream);
+	return inflated.length > 0 ? [inflated subdataWithRange:NSMakeRange(0, MIN(inflated.length, length))] : nil;
+}
+
+- (NSData*)zipInflateData:(NSData*)compressed
+{
+	NSMutableData* result = [NSMutableData data];
+	z_stream stream;
+	memset(&stream, 0, sizeof(stream));
+	if (inflateInit2(&stream, -MAX_WBITS) != Z_OK)
+	{
+		return nil;
+	}
+	stream.next_in = (Bytef*)compressed.bytes;
+	stream.avail_in = (uInt)compressed.length;
+	uint8_t outBuffer[65536];
+	int ret = Z_OK;
+	do
+	{
+		stream.next_out = outBuffer;
+		stream.avail_out = sizeof(outBuffer);
+		ret = inflate(&stream, Z_NO_FLUSH);
+		if (ret != Z_OK && ret != Z_STREAM_END)
+		{
+			break;
+		}
+		[result appendBytes:outBuffer length:sizeof(outBuffer) - stream.avail_out];
+	} while (stream.avail_out == 0);
+	inflateEnd(&stream);
+	return ret == Z_STREAM_END ? result : nil;
+}
+
+- (void)verifyAndInstallIPAAtPath:(NSString*)path
+{
+	dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^
+	{
+		NSDictionary* verification = [self verifyIPAAtPath:path];
+		if (verification[@"error"])
+		{
+			dispatch_async(dispatch_get_main_queue(), ^
+			{
+				[self showAlert:@"Invalid .ipa" message:[NSString stringWithFormat:@"The downloaded file is not a valid .ipa:\n%@\n\nThe file was saved to:\n%@\n\nInstall it with TrollStore or Filza to see the original error.", verification[@"error"], path]];
+			});
+			return;
+		}
+		if (verification[@"encrypted"])
+		{
+			[self appendToInstallLog:[NSString stringWithFormat:@"[%@] %@ is FairPlay-encrypted; install requires on-device App Store account to match the download account.\n---\n", [NSDate date], path]];
+		}
+		[self installIPAAutomaticallyAtPath:path];
+	});
 }
 
 - (void)installIPAAutomaticallyAtPath:(NSString*)path
