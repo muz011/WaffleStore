@@ -69,7 +69,7 @@ static BOOL WFSSpawnWithTimeout(NSArray* arguments, NSTimeInterval timeout, BOOL
 	return WIFEXITED(status) && WEXITSTATUS(status) == 0;
 }
 
-static NSInteger WFSSpawnRootWithTimeout(NSArray* arguments, NSTimeInterval timeout, BOOL* cancelled, NSString** output, int* spawnErrnoOut, void (^progressHandler)(NSString* message))
+static NSInteger WFSSpawnRootWithTimeout(NSArray* arguments, NSTimeInterval timeout, BOOL* cancelled, NSString** output, int* spawnErrnoOut, void (^progressHandler)(NSString* message), void (^outputHandler)(NSString* chunk))
 {
 	NSMutableArray* allArguments = [NSMutableArray arrayWithArray:arguments];
 	[allArguments insertObject:arguments.firstObject atIndex:0];
@@ -169,18 +169,25 @@ static NSInteger WFSSpawnRootWithTimeout(NSArray* arguments, NSTimeInterval time
 		NSString* newOutput = availableLength > lastScannedLength ? [collected substringFromIndex:lastScannedLength] : nil;
 		lastScannedLength = availableLength;
 		[outputLock unlock];
-		if (newOutput && progressHandler)
+		if (newOutput)
 		{
-			for (NSString* line in [newOutput componentsSeparatedByString:@"\n"])
+			if (outputHandler && newOutput.length > 0)
 			{
-				if ([line hasPrefix:@"WFS_PROGRESS: "])
+				outputHandler(newOutput);
+			}
+			if (progressHandler)
+			{
+				for (NSString* line in [newOutput componentsSeparatedByString:@"\n"])
 				{
-					NSString* payload = [line substringFromIndex:@"WFS_PROGRESS: ".length];
-					NSArray* parts = [payload componentsSeparatedByString:@" "];
-					if (parts.count >= 2)
+					if ([line hasPrefix:@"WFS_PROGRESS: "])
 					{
-						NSString* prettyStatus = [parts[1] stringByReplacingOccurrencesOfString:@"_" withString:@" "];
-						progressHandler([NSString stringWithFormat:@"Installing via system installer… %@%% (%@)", parts[0], prettyStatus]);
+						NSString* payload = [line substringFromIndex:@"WFS_PROGRESS: ".length];
+						NSArray* parts = [payload componentsSeparatedByString:@" "];
+						if (parts.count >= 2)
+						{
+							NSString* prettyStatus = [parts[1] stringByReplacingOccurrencesOfString:@"_" withString:@" "];
+							progressHandler([NSString stringWithFormat:@"Installing via system installer… %@%% (%@)", parts[0], prettyStatus]);
+						}
 					}
 				}
 			}
@@ -1805,6 +1812,9 @@ static uint64_t wfsReadU64(const uint8_t* bytes, BOOL bigEndian)
 		NSInteger exitCode = WFSSpawnRootWithTimeout(@[ executablePath, @"--wfs-install", path ], 240.0, &cancelled, &childOutput, &spawnErrno, ^(NSString* message)
 		{
 			[self updateInstallProgressMessage:message];
+		}, ^(NSString* chunk)
+		{
+			[self appendToInstallLog:[NSString stringWithFormat:@"[%@] child: %@", [NSDate date], chunk]];
 		});
 		[self appendToInstallLog:[NSString stringWithFormat:@"[%@] install of %@ -> exit %ld (spawn errno %d, encrypted %d)\n%@\n---\n", [NSDate date], path, (long)exitCode, spawnErrno, encrypted, childOutput ?: @"(no output)"]];
 		if (cancelled)
@@ -1814,7 +1824,8 @@ static uint64_t wfsReadU64(const uint8_t* bytes, BOOL bigEndian)
 		}
 		if (exitCode == -300)
 		{
-			[self finishInstallWithMessage:[NSString stringWithFormat:@"The system installer did not finish in time. The .ipa is saved to:\n%@\n\nYou can install it with TrollStore or Filza, or try again.", path] title:@"Install Taking Too Long" path:path finished:&finished];
+			NSString* trimmedOutput = childOutput.length > 600 ? [childOutput substringFromIndex:childOutput.length - 600] : childOutput;
+			[self finishInstallWithMessage:[NSString stringWithFormat:@"The system installer did not finish in time.\n\nThis usually means the device is not signed into the App Store with the same Apple ID that downloaded the app, so the DRM check stalls.\n\nOpen Settings, tap your name at the top, then Media & Purchases, and sign in with the download account. Then try again.\n\nChild output:\n%@\n\nThe .ipa is saved to:\n%@", trimmedOutput ?: @"(no output)", path] title:@"Install Taking Too Long" path:path finished:&finished];
 			return;
 		}
 		if (exitCode == -200 || exitCode == -400)

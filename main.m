@@ -26,6 +26,8 @@ static void wfsMobileInstallationStatusCallback(CFDictionaryRef information)
 
 static int wfsRunRootInstall(NSString* ipaPath)
 {
+	printf("WFS_DIAG: euid=%d egid=%d sandboxed=1\n", (int)geteuid(), (int)getegid());
+	fflush(stdout);
 	void* handle = dlopen("/System/Library/PrivateFrameworks/MobileInstallation.framework/MobileInstallation", RTLD_LAZY);
 	if (!handle)
 	{
