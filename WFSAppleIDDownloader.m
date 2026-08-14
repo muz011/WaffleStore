@@ -680,6 +680,14 @@ static const NSInteger kWFSMaxAuthAttempts = 100;
 	return @"143441";
 }
 
+- (void)finishCommerceHistory:(WFSAppleIDHistoryCompletion)completion purchases:(NSArray*)purchases response:(NSDictionary*)response error:(NSError*)error
+{
+	dispatch_async(dispatch_get_main_queue(), ^
+	{
+		completion(purchases, response, error);
+	});
+}
+
 - (void)fetchCommercePurchaseHistoryWithRange:(NSString*)range page:(NSInteger)page paginationToken:(NSString*)paginationToken completion:(WFSAppleIDHistoryCompletion)completion
 {
 	NSString* tokenParam = @"";
@@ -709,7 +717,7 @@ static const NSInteger kWFSMaxAuthAttempts = 100;
 	{
 		if (error)
 		{
-			completion(nil, nil, [self networkError:error]);
+			[self finishCommerceHistory:completion purchases:nil response:nil error:[self networkError:error]];
 			return;
 		}
 		NSHTTPURLResponse* http = (NSHTTPURLResponse*)response;
@@ -718,7 +726,7 @@ static const NSInteger kWFSMaxAuthAttempts = 100;
 		if (http.statusCode == 204)
 		{
 			[self writeDebugLog:[NSString stringWithFormat:@"commerce/account/purchases -> 204 (no purchases in range)"]];
-			completion(@[], @{}, nil);
+			[self finishCommerceHistory:completion purchases:@[] response:@{} error:nil];
 			return;
 		}
 		if (http.statusCode != 200)
@@ -740,10 +748,10 @@ static const NSInteger kWFSMaxAuthAttempts = 100;
 				}
 				if ([code isEqualToString:@"authentication"])
 				{
-					completion(nil, nil, [self errorWithCode:WFSAppleIDDownloaderErrorAuthenticationFailed message:@"Apple rejected the commerce request as unauthenticated. The stored sign-in session may be expired; sign in again."]);
+					[self finishCommerceHistory:completion purchases:nil response:nil error:[self errorWithCode:WFSAppleIDDownloaderErrorAuthenticationFailed message:@"Apple rejected the commerce request as unauthenticated. The stored sign-in session may be expired; sign in again."]];
 					return;
 				}
-				completion(nil, nil, [self errorWithCode:WFSAppleIDDownloaderErrorInvalidResponse message:[NSString stringWithFormat:@"Commerce API error (HTTP %ld, code %@)", (long)http.statusCode, code.length ? code : @"?"]]);
+				[self finishCommerceHistory:completion purchases:nil response:nil error:[self errorWithCode:WFSAppleIDDownloaderErrorInvalidResponse message:[NSString stringWithFormat:@"Commerce API error (HTTP %ld, code %@)", (long)http.statusCode, code.length ? code : @"?"]]];
 				return;
 			}
 			NSString* contentType = http.allHeaderFields[@"Content-Type"];
@@ -751,13 +759,13 @@ static const NSInteger kWFSMaxAuthAttempts = 100;
 			{
 				contentType = @"?";
 			}
-			completion(nil, nil, [self errorWithCode:WFSAppleIDDownloaderErrorInvalidResponse message:[NSString stringWithFormat:@"Commerce API returned HTTP %ld (%@): %@", (long)http.statusCode, contentType, [self responseExcerptFromData:data]]]);
+			[self finishCommerceHistory:completion purchases:nil response:nil error:[self errorWithCode:WFSAppleIDDownloaderErrorInvalidResponse message:[NSString stringWithFormat:@"Commerce API returned HTTP %ld (%@): %@", (long)http.statusCode, contentType, [self responseExcerptFromData:data]]]];
 			return;
 		}
 		NSDictionary* json = [self parseJSONResponse:data];
 		if (!json)
 		{
-			completion(nil, nil, [self errorWithCode:WFSAppleIDDownloaderErrorInvalidResponse message:[NSString stringWithFormat:@"Commerce API returned invalid JSON (HTTP %ld): %@", (long)http.statusCode, [self responseExcerptFromData:data]]]);
+			[self finishCommerceHistory:completion purchases:nil response:nil error:[self errorWithCode:WFSAppleIDDownloaderErrorInvalidResponse message:[NSString stringWithFormat:@"Commerce API returned invalid JSON (HTTP %ld): %@", (long)http.statusCode, [self responseExcerptFromData:data]]]];
 			return;
 		}
 		NSMutableArray* purchases = [NSMutableArray array];
@@ -836,7 +844,7 @@ static const NSInteger kWFSMaxAuthAttempts = 100;
 			}
 		}
 		[self writeDebugLog:[NSString stringWithFormat:@"commerce/account/purchases -> %lu purchase(s)", (unsigned long)purchases.count]];
-		completion(purchases, json, nil);
+		[self finishCommerceHistory:completion purchases:purchases response:json error:nil];
 	}] resume];
 }
 

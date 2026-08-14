@@ -142,9 +142,25 @@
 	[_fetchButton setTitle:@"Fetching…" forState:UIControlStateNormal];
 	[self appendLog:@"---"];
 	[self appendLog:[NSString stringWithFormat:@"guid: %@", downloader.guid ?: @"?"]];
+	__weak typeof(self) weakSelf = self;
+	if (_rangeControl.selectedSegmentIndex == 4)
+	{
+		NSInteger currentYear = [self currentYear];
+		[self setStatus:[NSString stringWithFormat:@"Fetching all-time history (2008-%ld)…", (long)currentYear]];
+		[self appendLog:[NSString stringWithFormat:@"all-time: probing %ld-all … %ld-all", (long)2008, (long)currentYear]];
+		[self fetchAllYearsWithYear:2008 currentYear:currentYear purchases:[NSMutableArray array] completion:^(NSArray* purchases, NSDictionary* firstResponse, NSError* error)
+		{
+			__strong typeof(self) self = weakSelf;
+			if (!self)
+			{
+				return;
+			}
+			[self finishFetchWithPurchases:purchases firstResponse:firstResponse error:error];
+		}];
+		return;
+	}
 	NSString* range = [self selectedRangeString];
 	[self setStatus:[NSString stringWithFormat:@"Fetching commerce history (range=%@)…", range]];
-	__weak typeof(self) weakSelf = self;
 	[self fetchCommercePagesWithRange:range token:nil purchases:[NSMutableArray array] completion:^(NSArray* purchases, NSDictionary* firstResponse, NSError* error)
 	{
 		__strong typeof(self) self = weakSelf;
@@ -152,41 +168,75 @@
 		{
 			return;
 		}
-		[self setRunning:NO];
-		[_fetchButton setTitle:@"Fetch Commerce History" forState:UIControlStateNormal];
-		if (error)
+		[self finishFetchWithPurchases:purchases firstResponse:firstResponse error:error];
+	}];
+}
+
+- (void)fetchAllYearsWithYear:(NSInteger)year currentYear:(NSInteger)currentYear purchases:(NSMutableArray*)purchases completion:(WFSAppleIDHistoryCompletion)completion
+{
+	if (year > currentYear)
+	{
+		completion(purchases, nil, nil);
+		return;
+	}
+	NSString* range = [NSString stringWithFormat:@"%ld-all", (long)year];
+	[self setStatus:[NSString stringWithFormat:@"All-time: probing %@…", range]];
+	__weak typeof(self) weakSelf = self;
+	[self fetchCommercePagesWithRange:range token:nil purchases:[NSMutableArray array] completion:^(NSArray* yearPurchases, NSDictionary* response, NSError* error)
+	{
+		__strong typeof(self) self = weakSelf;
+		if (!self)
 		{
-			[self setStatus:@"Failed."];
-			[self appendLog:[NSString stringWithFormat:@"FAILED [%ld]: %@", (long)error.code, error.localizedDescription]];
-			if (downloader.lastDownloadEndpoint.length)
-			{
-				[self appendLog:[NSString stringWithFormat:@"  endpoint: %@", downloader.lastDownloadEndpoint]];
-			}
 			return;
 		}
-		[self setStatus:@"Done."];
-		[self appendLog:[NSString stringWithFormat:@"endpoint: %@", downloader.lastDownloadEndpoint]];
-		if ([firstResponse isKindOfClass:[NSDictionary class]])
+		if (error)
 		{
-			NSArray* keys = [firstResponse.allKeys sortedArrayUsingSelector:@selector(compare:)];
-			[self appendLog:[NSString stringWithFormat:@"response keys (%lu): %@", (unsigned long)keys.count, [keys componentsJoinedByString:@", "]]];
-			NSDictionary* rangeInfo = firstResponse[@"range"];
-			if ([rangeInfo isKindOfClass:[NSDictionary class]])
-			{
-				[self appendLog:[NSString stringWithFormat:@"range: start=%@ displayable=%@", [self stringFrom:rangeInfo[@"start"]], [self stringFrom:rangeInfo[@"displayable-range"]]]];
-			}
+			completion(purchases, nil, error);
+			return;
 		}
-		[self appendLog:[NSString stringWithFormat:@"total purchases: %lu", (unsigned long)purchases.count]];
-		for (NSUInteger i = 0; i < purchases.count; i++)
-		{
-			NSDictionary* purchase = purchases[i];
-			NSString* title = purchase[@"title"];
-			NSString* adamId = purchase[@"adamId"];
-			NSString* bundleId = purchase[@"bundleId"];
-			NSString* purchaseDate = purchase[@"purchaseDate"];
-			[self appendLog:[NSString stringWithFormat:@"%lu. %@ #%@ %@ %@", (unsigned long)(i + 1), title ?: @"(untitled)", adamId ?: @"?", bundleId ?: @"?", purchaseDate ?: @"?"]];
-		}
+		[purchases addObjectsFromArray:yearPurchases];
+		[self appendLog:[NSString stringWithFormat:@"  %@ -> %lu purchase(s)", range, (unsigned long)yearPurchases.count]];
+		[self fetchAllYearsWithYear:year + 1 currentYear:currentYear purchases:purchases completion:completion];
 	}];
+}
+
+- (void)finishFetchWithPurchases:(NSArray*)purchases firstResponse:(NSDictionary*)firstResponse error:(NSError*)error
+{
+	WFSAppleIDDownloader* downloader = [WFSAppleIDDownloader sharedDownloader];
+	[self setRunning:NO];
+	[_fetchButton setTitle:@"Fetch Commerce History" forState:UIControlStateNormal];
+	if (error)
+	{
+		[self setStatus:@"Failed."];
+		[self appendLog:[NSString stringWithFormat:@"FAILED [%ld]: %@", (long)error.code, error.localizedDescription]];
+		if (downloader.lastDownloadEndpoint.length)
+		{
+			[self appendLog:[NSString stringWithFormat:@"  endpoint: %@", downloader.lastDownloadEndpoint]];
+		}
+		return;
+	}
+	[self setStatus:@"Done."];
+	[self appendLog:[NSString stringWithFormat:@"endpoint: %@", downloader.lastDownloadEndpoint]];
+	if ([firstResponse isKindOfClass:[NSDictionary class]])
+	{
+		NSArray* keys = [firstResponse.allKeys sortedArrayUsingSelector:@selector(compare:)];
+		[self appendLog:[NSString stringWithFormat:@"response keys (%lu): %@", (unsigned long)keys.count, [keys componentsJoinedByString:@", "]]];
+		NSDictionary* rangeInfo = firstResponse[@"range"];
+		if ([rangeInfo isKindOfClass:[NSDictionary class]])
+		{
+			[self appendLog:[NSString stringWithFormat:@"range: start=%@ displayable=%@", [self stringFrom:rangeInfo[@"start"]], [self stringFrom:rangeInfo[@"displayable-range"]]]];
+		}
+	}
+	[self appendLog:[NSString stringWithFormat:@"total purchases: %lu", (unsigned long)purchases.count]];
+	for (NSUInteger i = 0; i < purchases.count; i++)
+	{
+		NSDictionary* purchase = purchases[i];
+		NSString* title = purchase[@"title"];
+		NSString* adamId = purchase[@"adamId"];
+		NSString* bundleId = purchase[@"bundleId"];
+		NSString* purchaseDate = purchase[@"purchaseDate"];
+		[self appendLog:[NSString stringWithFormat:@"%lu. %@ #%@ %@ %@", (unsigned long)(i + 1), title ?: @"(untitled)", adamId ?: @"?", bundleId ?: @"?", purchaseDate ?: @"?"]];
+	}
 }
 
 - (void)fetchCommercePagesWithRange:(NSString*)range token:(NSString*)token purchases:(NSMutableArray*)purchases completion:(WFSAppleIDHistoryCompletion)completion
@@ -320,11 +370,14 @@
 			return @"2025-all";
 		case 3:
 			return @"2024-all";
-		case 4:
-			return @"1970-all";
 		default:
 			return @"last90Days";
 	}
+}
+
+- (NSInteger)currentYear
+{
+	return [[NSCalendar currentCalendar] component:NSCalendarUnitYear fromDate:[NSDate date]];
 }
 
 - (NSString*)stringFrom:(id)value
