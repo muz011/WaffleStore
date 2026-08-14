@@ -3,7 +3,6 @@
 #import "WFSAppleIDDownloader.h"
 #import "CoreServices.h"
 #import <SystemConfiguration/SystemConfiguration.h>
-#import <Security/Security.h>
 #import <zlib.h>
 #import <spawn.h>
 #import <string.h>
@@ -15,6 +14,10 @@
 #import <dlfcn.h>
 
 extern char** environ;
+
+typedef struct __WFSSecTask* WFSSecTaskRef;
+extern WFSSecTaskRef SecTaskCreateFromSelf(CFAllocatorRef allocator);
+extern CFTypeRef SecTaskCopyValueForEntitlement(WFSSecTaskRef task, CFStringRef entitlement, CFErrorRef* error);
 
 extern int posix_spawnattr_set_persona_np(const posix_spawnattr_t* __restrict attrs, uid_t persona_id, uint32_t flags);
 extern int posix_spawnattr_set_persona_uid_np(const posix_spawnattr_t* __restrict attrs, uid_t uid);
@@ -28,7 +31,7 @@ typedef int (*WFSJBClientSpawnFn)(uid_t uid, gid_t gid, int argc, char** argv, v
 
 static NSNumber* wfsEffectiveEntitlement(NSString* key)
 {
-	SecTaskRef task = SecTaskCreateFromSelf(NULL);
+	WFSSecTaskRef task = SecTaskCreateFromSelf(NULL);
 	if (!task)
 	{
 		return nil;
