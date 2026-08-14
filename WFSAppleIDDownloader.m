@@ -5,6 +5,7 @@ NSString* const WFSAppleIDDownloaderErrorDomain = @"WFSAppleIDDownloaderErrorDom
 
 static NSString* const kWFSConfiguratorUA = @"Configurator/2.17 (Macintosh; OS X 15.2; 24C5089c) AppleWebKit/0620.1.16.11.6";
 static NSString* const kWFSStoreElementsUA = @"Configurator/2.17 (Macintosh; macOS 15.2; 24C5089c) AppleWebKit/0620.1.16.11.6";
+static NSString* const kWFSCommerceUA = @"Configurator/2.18 (Macintosh; OS X 15.3.2; 24D81) AppleWebKit/0620.2.4.11.6";
 static NSString* const kWFSFastAuthEndpoint = @"https://auth.itunes.apple.com/auth/v1/native/fast/";
 static NSString* const kWFSLegacyAuthEndpoint = @"https://buy.itunes.apple.com/WebObjects/MZFinance.woa/wa/authenticate";
 static NSString* const kWFSInitBagEndpoint = @"https://init.itunes.apple.com/bag.xml?guid=%@";
@@ -677,6 +678,160 @@ static const NSInteger kWFSMaxAuthAttempts = 100;
 		}
 	}
 	return @"143441";
+}
+
+- (void)fetchCommercePurchaseHistoryWithRange:(NSString*)range page:(NSInteger)page paginationToken:(NSString*)paginationToken completion:(WFSAppleIDHistoryCompletion)completion
+{
+	NSString* tokenParam = @"";
+	if (paginationToken.length)
+	{
+		tokenParam = [NSString stringWithFormat:@"&pagination-token=%@", [self percentEncode:paginationToken]];
+	}
+	NSString* urlString = [NSString stringWithFormat:@"https://%@/commerce/account/purchases?guid=%@&range=%@&page=%ld%@", [self buyHost], [self percentEncode:self.guid], [self percentEncode:range], (long)page, tokenParam];
+	self.lastDownloadEndpoint = urlString;
+	NSMutableURLRequest* request = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:urlString]];
+	[request setValue:kWFSCommerceUA forHTTPHeaderField:@"User-Agent"];
+	[request setValue:@"*/*" forHTTPHeaderField:@"Accept"];
+	[request setValue:@"en-US,en;q=0.5" forHTTPHeaderField:@"Accept-Language"];
+	if (self.dsid.length)
+	{
+		[request setValue:self.dsid forHTTPHeaderField:@"X-Dsid"];
+		[request setValue:self.dsid forHTTPHeaderField:@"iCloud-Dsid"];
+	}
+	NSString* storeFrontId = [self storeFrontIdForPurchases];
+	if (storeFrontId.length)
+	{
+		[request setValue:storeFrontId forHTTPHeaderField:@"X-Apple-Store-Front"];
+	}
+	NSInteger tzOffsetMinutes = [[NSTimeZone localTimeZone] secondsFromGMT] / 60;
+	[request setValue:[NSString stringWithFormat:@"%ld", (long)tzOffsetMinutes] forHTTPHeaderField:@"X-Apple-TZ"];
+	[[self.session dataTaskWithRequest:request completionHandler:^(NSData* data, NSURLResponse* response, NSError* error)
+	{
+		if (error)
+		{
+			completion(nil, nil, [self networkError:error]);
+			return;
+		}
+		NSHTTPURLResponse* http = (NSHTTPURLResponse*)response;
+		[self writeDebugLog:[NSString stringWithFormat:@"commerce/account/purchases (range=%@, page=%ld) -> HTTP %ld (%lu bytes)", range, (long)page, (long)http.statusCode, (unsigned long)data.length]];
+		[self writeRawResponseData:data label:@"commerce"];
+		if (http.statusCode != 200)
+		{
+			NSDictionary* errorJson = [self parseJSONResponse:data];
+			if (errorJson && [errorJson[@"errors"] isKindOfClass:[NSArray class]])
+			{
+				NSString* code = @"";
+				for (id entry in errorJson[@"errors"])
+				{
+					if ([entry isKindOfClass:[NSDictionary class]])
+					{
+						code = [self stringForKey:@"code" in:(NSDictionary*)entry];
+						if (code.length)
+						{
+							break;
+						}
+					}
+				}
+				if ([code isEqualToString:@"authentication"])
+				{
+					completion(nil, nil, [self errorWithCode:WFSAppleIDDownloaderErrorAuthenticationFailed message:@"Apple rejected the commerce request as unauthenticated. The stored sign-in session may be expired; sign in again."]);
+					return;
+				}
+				completion(nil, nil, [self errorWithCode:WFSAppleIDDownloaderErrorInvalidResponse message:[NSString stringWithFormat:@"Commerce API error (HTTP %ld, code %@)", (long)http.statusCode, code.length ? code : @"?"]]);
+				return;
+			}
+			NSString* contentType = http.allHeaderFields[@"Content-Type"];
+			if (![contentType isKindOfClass:[NSString class]])
+			{
+				contentType = @"?";
+			}
+			completion(nil, nil, [self errorWithCode:WFSAppleIDDownloaderErrorInvalidResponse message:[NSString stringWithFormat:@"Commerce API returned HTTP %ld (%@): %@", (long)http.statusCode, contentType, [self responseExcerptFromData:data]]]);
+			return;
+		}
+		NSDictionary* json = [self parseJSONResponse:data];
+		if (!json)
+		{
+			completion(nil, nil, [self errorWithCode:WFSAppleIDDownloaderErrorInvalidResponse message:[NSString stringWithFormat:@"Commerce API returned invalid JSON (HTTP %ld): %@", (long)http.statusCode, [self responseExcerptFromData:data]]]);
+			return;
+		}
+		NSMutableArray* purchases = [NSMutableArray array];
+		NSArray* orders = json[@"purchases"];
+		if ([orders isKindOfClass:[NSArray class]])
+		{
+			for (id orderObj in orders)
+			{
+				if (![orderObj isKindOfClass:[NSDictionary class]])
+				{
+					continue;
+				}
+				NSDictionary* order = (NSDictionary*)orderObj;
+				NSString* orderId = [self stringForKey:@"order-id" in:order];
+				NSString* invoiceDate = [self stringForKey:@"invoice-date" in:order];
+				NSArray* items = order[@"items"];
+				if ([items isKindOfClass:[NSArray class]])
+				{
+					for (id itemObj in items)
+					{
+						if (![itemObj isKindOfClass:[NSDictionary class]])
+						{
+							continue;
+						}
+						NSDictionary* item = (NSDictionary*)itemObj;
+						NSMutableDictionary* purchase = [NSMutableDictionary dictionary];
+						NSString* adamId = [self stringForKey:@"item-id" in:item];
+						if (!adamId.length)
+						{
+							adamId = [self stringForKey:@"itemId" in:item];
+						}
+						if (adamId.length)
+						{
+							purchase[@"adamId"] = adamId;
+						}
+						NSString* title = [self stringForKey:@"item-name" in:item];
+						if (!title.length)
+						{
+							title = [self stringForKey:@"item-title" in:item];
+						}
+						if (title.length)
+						{
+							purchase[@"title"] = title;
+						}
+						NSString* bundleId = [self stringForKey:@"bundle-id" in:item];
+						if (!bundleId.length)
+						{
+							bundleId = [self stringForKey:@"bundleId" in:item];
+						}
+						if (bundleId.length)
+						{
+							purchase[@"bundleId"] = bundleId;
+						}
+						NSString* purchaseDate = [self stringForKey:@"purchase-date" in:item];
+						if (!purchaseDate.length)
+						{
+							purchaseDate = invoiceDate;
+						}
+						if (purchaseDate.length)
+						{
+							purchase[@"purchaseDate"] = purchaseDate;
+						}
+						NSMutableDictionary* metadata = [NSMutableDictionary dictionaryWithDictionary:item];
+						if (orderId.length)
+						{
+							metadata[@"order-id"] = orderId;
+						}
+						if (invoiceDate.length)
+						{
+							metadata[@"invoice-date"] = invoiceDate;
+						}
+						purchase[@"metadata"] = metadata;
+						[purchases addObject:purchase];
+					}
+				}
+			}
+		}
+		[self writeDebugLog:[NSString stringWithFormat:@"commerce/account/purchases -> %lu purchase(s)", (unsigned long)purchases.count]];
+		completion(purchases, json, nil);
+	}] resume];
 }
 
 - (void)finishHistory:(WFSAppleIDHistoryCompletion)completion purchases:(NSArray*)purchases response:(NSDictionary*)response error:(NSError*)error

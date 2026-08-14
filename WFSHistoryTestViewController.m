@@ -4,6 +4,7 @@
 @implementation WFSHistoryTestViewController
 {
 	UIButton* _fetchButton;
+	UIButton* _probeButton;
 	UIButton* _clearButton;
 	UILabel* _statusLabel;
 	UITextView* _logView;
@@ -17,11 +18,18 @@
 	self.view.backgroundColor = [UIColor systemGroupedBackgroundColor];
 
 	_fetchButton = [UIButton buttonWithType:UIButtonTypeSystem];
-	[_fetchButton setTitle:@"Fetch All History" forState:UIControlStateNormal];
+	[_fetchButton setTitle:@"Commerce History (90d)" forState:UIControlStateNormal];
 	[_fetchButton setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
 	_fetchButton.backgroundColor = [UIColor systemBlueColor];
 	_fetchButton.layer.cornerRadius = 10;
 	[_fetchButton addTarget:self action:@selector(startTest) forControlEvents:UIControlEventTouchUpInside];
+
+	_probeButton = [UIButton buttonWithType:UIButtonTypeSystem];
+	[_probeButton setTitle:@"Probe Range Values" forState:UIControlStateNormal];
+	[_probeButton setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
+	_probeButton.backgroundColor = [UIColor systemOrangeColor];
+	_probeButton.layer.cornerRadius = 10;
+	[_probeButton addTarget:self action:@selector(startProbe) forControlEvents:UIControlEventTouchUpInside];
 
 	_clearButton = [UIButton buttonWithType:UIButtonTypeSystem];
 	[_clearButton setTitle:@"Clear Log" forState:UIControlStateNormal];
@@ -42,6 +50,7 @@
 	_logView.text = @"Purchase history test.\n";
 
 	[self.view addSubview:_fetchButton];
+	[self.view addSubview:_probeButton];
 	[self.view addSubview:_clearButton];
 	[self.view addSubview:_statusLabel];
 	[self.view addSubview:_logView];
@@ -52,6 +61,7 @@
 - (void)setupConstraints
 {
 	_fetchButton.translatesAutoresizingMaskIntoConstraints = NO;
+	_probeButton.translatesAutoresizingMaskIntoConstraints = NO;
 	_clearButton.translatesAutoresizingMaskIntoConstraints = NO;
 	_statusLabel.translatesAutoresizingMaskIntoConstraints = NO;
 	_logView.translatesAutoresizingMaskIntoConstraints = NO;
@@ -62,7 +72,12 @@
 		[_fetchButton.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor constant:-16],
 		[_fetchButton.heightAnchor constraintEqualToConstant:44],
 
-		[_statusLabel.topAnchor constraintEqualToAnchor:_fetchButton.bottomAnchor constant:10],
+		[_probeButton.topAnchor constraintEqualToAnchor:_fetchButton.bottomAnchor constant:10],
+		[_probeButton.leadingAnchor constraintEqualToAnchor:_fetchButton.leadingAnchor],
+		[_probeButton.trailingAnchor constraintEqualToAnchor:_fetchButton.trailingAnchor],
+		[_probeButton.heightAnchor constraintEqualToConstant:40],
+
+		[_statusLabel.topAnchor constraintEqualToAnchor:_probeButton.bottomAnchor constant:10],
 		[_statusLabel.leadingAnchor constraintEqualToAnchor:_fetchButton.leadingAnchor constant:4],
 		[_statusLabel.trailingAnchor constraintEqualToAnchor:_fetchButton.trailingAnchor constant:-4],
 
@@ -88,6 +103,13 @@
 	_statusLabel.text = status;
 }
 
+- (void)setRunning:(BOOL)running
+{
+	_running = running;
+	_fetchButton.enabled = !running;
+	_probeButton.enabled = !running;
+}
+
 - (void)clearLog
 {
 	_logView.text = @"Purchase history test.\n";
@@ -106,32 +128,21 @@
 		[self appendLog:@"ERROR: not signed in. Use the authTest tab to sign in first."];
 		return;
 	}
-	_running = YES;
-	_fetchButton.enabled = NO;
+	[self setRunning:YES];
 	[_fetchButton setTitle:@"Fetching…" forState:UIControlStateNormal];
 	[self appendLog:@"---"];
-	[self setStatus:@"Fetching purchase history…"];
+	[self appendLog:[NSString stringWithFormat:@"guid: %@", downloader.guid ?: @"?"]];
+	[self setStatus:@"Fetching commerce history (range=last90Days)…"];
 	__weak typeof(self) weakSelf = self;
-	downloader.historyProgressHandler = ^(NSInteger chunkNumber, NSInteger chunkCount, NSInteger totalPurchases)
+	[self fetchCommercePagesWithRange:@"last90Days" token:nil purchases:[NSMutableArray array] completion:^(NSArray* purchases, NSDictionary* firstResponse, NSError* error)
 	{
 		__strong typeof(self) self = weakSelf;
 		if (!self)
 		{
 			return;
 		}
-		[self appendLog:[NSString stringWithFormat:@"chunk %ld -> %ld metadata app(s), total %ld", (long)chunkNumber, (long)chunkCount, (long)totalPurchases]];
-	};
-	[downloader getAllPurchaseHistoryWithCompletion:^(NSArray* purchases, NSDictionary* firstResponse, NSError* error)
-	{
-		__strong typeof(self) self = weakSelf;
-		if (!self)
-		{
-			return;
-		}
-		downloader.historyProgressHandler = nil;
-		_running = NO;
-		_fetchButton.enabled = YES;
-		[_fetchButton setTitle:@"Fetch All History" forState:UIControlStateNormal];
+		[self setRunning:NO];
+		[_fetchButton setTitle:@"Commerce History (90d)" forState:UIControlStateNormal];
 		if (error)
 		{
 			[self setStatus:@"Failed."];
@@ -148,22 +159,13 @@
 		{
 			NSArray* keys = [firstResponse.allKeys sortedArrayUsingSelector:@selector(compare:)];
 			[self appendLog:[NSString stringWithFormat:@"response keys (%lu): %@", (unsigned long)keys.count, [keys componentsJoinedByString:@", "]]];
-		}
-		[self appendLog:[NSString stringWithFormat:@"total purchases: %lu", (unsigned long)purchases.count]];
-		NSMutableSet* metadataKeys = [NSMutableSet set];
-		for (NSDictionary* purchase in purchases)
-		{
-			NSDictionary* metadata = purchase[@"metadata"];
-			if ([metadata isKindOfClass:[NSDictionary class]])
+			NSDictionary* rangeInfo = firstResponse[@"range"];
+			if ([rangeInfo isKindOfClass:[NSDictionary class]])
 			{
-				[metadataKeys addObjectsFromArray:metadata.allKeys];
+				[self appendLog:[NSString stringWithFormat:@"range: start=%@ displayable=%@", [self stringFrom:rangeInfo[@"start"]], [self stringFrom:rangeInfo[@"displayable-range"]]]];
 			}
 		}
-		if (metadataKeys.count)
-		{
-			NSArray* sortedKeys = [metadataKeys.allObjects sortedArrayUsingSelector:@selector(compare:)];
-			[self appendLog:[NSString stringWithFormat:@"metadata keys seen (%lu): %@", (unsigned long)sortedKeys.count, [sortedKeys componentsJoinedByString:@", "]]];
-		}
+		[self appendLog:[NSString stringWithFormat:@"total purchases: %lu", (unsigned long)purchases.count]];
 		for (NSUInteger i = 0; i < purchases.count; i++)
 		{
 			NSDictionary* purchase = purchases[i];
@@ -171,15 +173,143 @@
 			NSString* adamId = purchase[@"adamId"];
 			NSString* bundleId = purchase[@"bundleId"];
 			NSString* purchaseDate = purchase[@"purchaseDate"];
-			NSString* marker = @"";
-			NSDictionary* metadata = purchase[@"metadata"];
-			if (![metadata isKindOfClass:[NSDictionary class]])
-			{
-				marker = @" [no metadata - possibly deleted/removed]";
-			}
-			[self appendLog:[NSString stringWithFormat:@"%lu. %@ #%@ %@ %@%@", (unsigned long)(i + 1), title ?: @"(untitled)", adamId ?: @"?", bundleId ?: @"?", purchaseDate ?: @"?", marker]];
+			[self appendLog:[NSString stringWithFormat:@"%lu. %@ #%@ %@ %@", (unsigned long)(i + 1), title ?: @"(untitled)", adamId ?: @"?", bundleId ?: @"?", purchaseDate ?: @"?"]];
 		}
 	}];
+}
+
+- (void)fetchCommercePagesWithRange:(NSString*)range token:(NSString*)token purchases:(NSMutableArray*)purchases completion:(WFSAppleIDHistoryCompletion)completion
+{
+	WFSAppleIDDownloader* downloader = [WFSAppleIDDownloader sharedDownloader];
+	NSInteger page = token.length ? 2 : 1;
+	[self appendLog:[NSString stringWithFormat:@"page %ld (range=%@%@)", (long)page, range, token.length ? [NSString stringWithFormat:@", token=%@", token] : @""]];
+	__weak typeof(self) weakSelf = self;
+	[downloader fetchCommercePurchaseHistoryWithRange:range page:page paginationToken:token completion:^(NSArray* pagePurchases, NSDictionary* response, NSError* error)
+	{
+		__strong typeof(self) self = weakSelf;
+		if (!self)
+		{
+			return;
+		}
+		if (error)
+		{
+			completion(purchases, nil, error);
+			return;
+		}
+		[purchases addObjectsFromArray:pagePurchases];
+		BOOL complete = [response[@"is-complete"] respondsToSelector:@selector(boolValue)] && [response[@"is-complete"] boolValue];
+		NSString* nextToken = nil;
+		if (!complete)
+		{
+			id tokenValue = response[@"pagination-token"];
+			if ([tokenValue isKindOfClass:[NSString class]] && ((NSString*)tokenValue).length)
+			{
+				nextToken = (NSString*)tokenValue;
+			}
+		}
+		if (nextToken && purchases.count < 1000)
+		{
+			dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.4 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^
+			{
+				[self fetchCommercePagesWithRange:range token:nextToken purchases:purchases completion:completion];
+			});
+			return;
+		}
+		completion(purchases, response, nil);
+	}];
+}
+
+- (void)startProbe
+{
+	if (_running)
+	{
+		return;
+	}
+	WFSAppleIDDownloader* downloader = [WFSAppleIDDownloader sharedDownloader];
+	if (!downloader.isAuthenticated)
+	{
+		[self appendLog:@"ERROR: not signed in. Use the authTest tab to sign in first."];
+		return;
+	}
+	[self setRunning:YES];
+	[self appendLog:@"--- probing range values ---"];
+	[self setStatus:@"Probing range values…"];
+	NSArray* candidates = @[
+		@"last90Days",
+		@"2024-Jan-01",
+		@"2024-01-01",
+		@"2024-12-31",
+		@"2024",
+		@"allTime",
+		@"last12Months",
+		@"30",
+		@"90",
+		@"365",
+		@"0",
+	];
+	__weak typeof(self) weakSelf = self;
+	[self probeRanges:candidates index:0 completion:^
+	{
+		__strong typeof(self) self = weakSelf;
+		if (!self)
+		{
+			return;
+		}
+		[self setRunning:NO];
+		[self setStatus:@"Probe done."];
+	}];
+}
+
+- (void)probeRanges:(NSArray*)ranges index:(NSUInteger)index completion:(void (^)(void))completion
+{
+	if (index >= ranges.count)
+	{
+		completion();
+		return;
+	}
+	NSString* range = ranges[index];
+	[self appendLog:[NSString stringWithFormat:@"range=%@", range]];
+	__weak typeof(self) weakSelf = self;
+	WFSAppleIDDownloader* downloader = [WFSAppleIDDownloader sharedDownloader];
+	[downloader fetchCommercePurchaseHistoryWithRange:range page:1 paginationToken:nil completion:^(NSArray* pagePurchases, NSDictionary* response, NSError* error)
+	{
+		__strong typeof(self) self = weakSelf;
+		if (!self)
+		{
+			return;
+		}
+		if (error)
+		{
+			[self appendLog:[NSString stringWithFormat:@"  -> %@", error.localizedDescription]];
+		}
+		else
+		{
+			NSString* echo = @"?";
+			NSDictionary* rangeInfo = response[@"range"];
+			if ([rangeInfo isKindOfClass:[NSDictionary class]])
+			{
+				echo = [NSString stringWithFormat:@"start=%@ disp=%@", [self stringFrom:rangeInfo[@"start"]], [self stringFrom:rangeInfo[@"displayable-range"]]];
+			}
+			[self appendLog:[NSString stringWithFormat:@"  -> HTTP 200 | %lu purchase(s) | %@", (unsigned long)pagePurchases.count, echo]];
+		}
+		dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^
+		{
+			[self probeRanges:ranges index:index + 1 completion:completion];
+		});
+	}];
+}
+
+- (NSString*)stringFrom:(id)value
+{
+	if ([value isKindOfClass:[NSString class]])
+	{
+		return (NSString*)value;
+	}
+	if ([value respondsToSelector:@selector(stringValue)])
+	{
+		return [value stringValue];
+	}
+	return @"?";
 }
 
 @end

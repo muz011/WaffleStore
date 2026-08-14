@@ -37,6 +37,7 @@ typedef void (^WFSAppleIDHistoryProgressHandler)(NSInteger pageNumber, NSInteger
 @property (nonatomic, copy, readonly, nullable) NSString* authenticatedAppleId;
 @property (nonatomic, copy, readonly, nullable) NSString* dsid;
 @property (nonatomic, copy, readonly, nullable) NSString* storeFront;
+@property (nonatomic, copy, readonly, nullable) NSString* guid;
 @property (nonatomic, copy, readonly, nullable) NSString* lastAuthEndpoint;
 @property (nonatomic, copy, readonly, nullable) NSString* lastDownloadEndpoint;
 @property (nonatomic, readonly) BOOL anisetteAvailable;
@@ -54,6 +55,7 @@ typedef void (^WFSAppleIDHistoryProgressHandler)(NSInteger pageNumber, NSInteger
 - (void)getExternalVersionIdsForAdamId:(long long)adamId completion:(WFSAppleIDVersionsInfoCompletion)completion;
 - (void)searchPurchaseHistoryForBundleID:(NSString*)bundleID completion:(WFSAppleIDPurchaseSearchCompletion)completion;
 - (void)getAllPurchaseHistoryWithCompletion:(void (^)(NSArray* _Nullable purchases, NSDictionary* _Nullable firstResponse, NSError* _Nullable error))completion;
+- (void)fetchCommercePurchaseHistoryWithRange:(NSString*)range page:(NSInteger)page paginationToken:(NSString*)paginationToken completion:(WFSAppleIDHistoryCompletion)completion;
 
 @end
 
