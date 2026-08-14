@@ -22,8 +22,31 @@ extern CFTypeRef SecTaskCopyValueForEntitlement(WFSSecTaskRef task, CFStringRef 
 extern int posix_spawnattr_set_persona_np(const posix_spawnattr_t* __restrict attrs, uid_t persona_id, uint32_t flags);
 extern int posix_spawnattr_set_persona_uid_np(const posix_spawnattr_t* __restrict attrs, uid_t uid);
 extern int posix_spawnattr_set_persona_gid_np(const posix_spawnattr_t* __restrict attrs, gid_t gid);
-extern int posix_spawnattr_set_persona_groups_np(const posix_spawnattr_t* __restrict attrs, gid_t* groups, int ngroups);
-extern int posix_spawnattr_set_persona_flags_np(const posix_spawnattr_t* __restrict attrs, uint32_t flags);
+
+typedef int (*WFSPersonaGroupsFn)(const posix_spawnattr_t* __restrict attrs, gid_t* groups, int ngroups);
+typedef int (*WFSPersonaFlagsFn)(const posix_spawnattr_t* __restrict attrs, uint32_t flags);
+
+static WFSPersonaGroupsFn wfsPersonaGroupsFn(void)
+{
+	static WFSPersonaGroupsFn cached = NULL;
+	static dispatch_once_t onceToken;
+	dispatch_once(&onceToken, ^
+	{
+		cached = (WFSPersonaGroupsFn)dlsym(RTLD_DEFAULT, "posix_spawnattr_set_persona_groups_np");
+	});
+	return cached;
+}
+
+static WFSPersonaFlagsFn wfsPersonaFlagsFn(void)
+{
+	static WFSPersonaFlagsFn cached = NULL;
+	static dispatch_once_t onceToken;
+	dispatch_once(&onceToken, ^
+	{
+		cached = (WFSPersonaFlagsFn)dlsym(RTLD_DEFAULT, "posix_spawnattr_set_persona_flags_np");
+	});
+	return cached;
+}
 
 typedef int (*WFSJBInitFn)(void);
 typedef int (*WFSJBClientCloseFn)(void);
@@ -277,8 +300,16 @@ static NSInteger WFSSpawnRootWithTimeout(NSArray* arguments, NSString* logFilePa
 	posix_spawnattr_set_persona_np(&attributes, 99, 0);
 	posix_spawnattr_set_persona_uid_np(&attributes, 0);
 	posix_spawnattr_set_persona_gid_np(&attributes, 0);
-	posix_spawnattr_set_persona_groups_np(&attributes, NULL, 0);
-	posix_spawnattr_set_persona_flags_np(&attributes, 0);
+	WFSPersonaGroupsFn groupsFn = wfsPersonaGroupsFn();
+	if (groupsFn)
+	{
+		groupsFn(&attributes, NULL, 0);
+	}
+	WFSPersonaFlagsFn flagsFn = wfsPersonaFlagsFn();
+	if (flagsFn)
+	{
+		flagsFn(&attributes, 0);
+	}
 	pid_t pid = 0;
 	int spawnResult = posix_spawn(&pid, argv[0], NULL, &attributes, argv, environ);
 	posix_spawnattr_destroy(&attributes);
