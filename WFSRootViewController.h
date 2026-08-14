@@ -8,5 +8,8 @@
 
 - (void)getAllAppVersionIdsAndPrompt:(long long)appId metadataPlist:(NSDictionary*)metadataPlist;
 - (void)promptAppleIDCredentialsWithCompletion:(void (^)(BOOL success))completion;
+- (void)startAppleIDDownloadForAppId:(long long)appId;
+- (void)signInToAppleID;
+- (void)downloadWithAppleID;
 
 @end

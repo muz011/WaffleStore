@@ -1,10 +1,6 @@
 #import "WFSAppDelegate.h"
 #import "WFSRootViewController.h"
 #import "WFSPurchasedAppsViewController.h"
-#import "WFSAuthTestViewController.h"
-#import "WFSDownloadTestViewController.h"
-#import "WFSVersionTestViewController.h"
-#import "WFSHistoryTestViewController.h"
 
 static void WFSUncaughtExceptionHandler(NSException* exception)
 {
@@ -34,27 +30,15 @@ static void WFSUncaughtExceptionHandler(NSException* exception)
 	{
 		[weakDowngradeViewController promptAppleIDCredentialsWithCompletion:completion];
 	};
+	purchasesViewController.appleIDDownloadHandler = ^(long long appId)
+	{
+		[weakDowngradeViewController startAppleIDDownloadForAppId:appId];
+	};
 	UINavigationController* purchasesNavigationController = [[UINavigationController alloc] initWithRootViewController:purchasesViewController];
 	purchasesNavigationController.tabBarItem = [[UITabBarItem alloc] initWithTitle:@"Purchased" image:[UIImage systemImageNamed:@"bag"] selectedImage:[UIImage systemImageNamed:@"bag.fill"]];
 
-	WFSAuthTestViewController* authTestViewController = [WFSAuthTestViewController new];
-	UINavigationController* authTestNavigationController = [[UINavigationController alloc] initWithRootViewController:authTestViewController];
-	authTestNavigationController.tabBarItem = [[UITabBarItem alloc] initWithTitle:@"authTest" image:[UIImage systemImageNamed:@"key"] selectedImage:[UIImage systemImageNamed:@"key.fill"]];
-
-	WFSDownloadTestViewController* downloadTestViewController = [WFSDownloadTestViewController new];
-	UINavigationController* downloadTestNavigationController = [[UINavigationController alloc] initWithRootViewController:downloadTestViewController];
-	downloadTestNavigationController.tabBarItem = [[UITabBarItem alloc] initWithTitle:@"downloadTest" image:[UIImage systemImageNamed:@"icloud.and.arrow.down"] selectedImage:[UIImage systemImageNamed:@"icloud.and.arrow.down.fill"]];
-
-	WFSVersionTestViewController* versionTestViewController = [WFSVersionTestViewController new];
-	UINavigationController* versionTestNavigationController = [[UINavigationController alloc] initWithRootViewController:versionTestViewController];
-	versionTestNavigationController.tabBarItem = [[UITabBarItem alloc] initWithTitle:@"verTest" image:[UIImage systemImageNamed:@"list.number"] selectedImage:[UIImage systemImageNamed:@"list.number"]];
-
-	WFSHistoryTestViewController* historyTestViewController = [WFSHistoryTestViewController new];
-	UINavigationController* historyTestNavigationController = [[UINavigationController alloc] initWithRootViewController:historyTestViewController];
-	historyTestNavigationController.tabBarItem = [[UITabBarItem alloc] initWithTitle:@"historyTest" image:[UIImage systemImageNamed:@"clock.arrow.circlepath"] selectedImage:[UIImage systemImageNamed:@"clock.arrow.circlepath"]];
-
 	UITabBarController* tabBarController = [UITabBarController new];
-	tabBarController.viewControllers = @[downgradeNavigationController, purchasesNavigationController, authTestNavigationController, downloadTestNavigationController, versionTestNavigationController, historyTestNavigationController];
+	tabBarController.viewControllers = @[downgradeNavigationController, purchasesNavigationController];
 	if (@available(iOS 15.0, *))
 	{
 		UITabBarAppearance* appearance = [UITabBarAppearance new];

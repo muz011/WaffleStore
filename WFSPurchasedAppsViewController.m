@@ -15,6 +15,81 @@ static dispatch_queue_t WFSMergeQueue(void)
 	return queue;
 }
 
+static const CGFloat WFSAppIconSize = 44;
+static const CGFloat WFSAppIconCornerRadius = 10;
+
+@interface WFSPurchasedAppCell : UITableViewCell
+@property (nonatomic, strong) UIImageView* appIconView;
++ (UIImage*)applePlaceholderImage;
+@end
+
+@implementation WFSPurchasedAppCell
+
++ (UIImage*)applePlaceholderImage
+{
+	static UIImage* placeholder;
+	static dispatch_once_t onceToken;
+	dispatch_once(&onceToken, ^
+	{
+		UIGraphicsImageRenderer* renderer = [[UIGraphicsImageRenderer alloc] initWithSize:CGSizeMake(WFSAppIconSize, WFSAppIconSize)];
+		placeholder = [renderer imageWithActions:^(UIGraphicsImageRendererContext* rendererContext)
+		{
+			UIBezierPath* path = [UIBezierPath bezierPathWithRoundedRect:CGRectMake(0, 0, WFSAppIconSize, WFSAppIconSize) cornerRadius:WFSAppIconCornerRadius];
+			[[UIColor systemGray5Color] setFill];
+			[path fill];
+			UIImage* glyph = [UIImage systemImageNamed:@"app"];
+			if (glyph)
+			{
+				glyph = [glyph imageWithTintColor:[UIColor systemGrayColor] renderingMode:UIImageRenderingModeAlwaysOriginal];
+				CGFloat glyphSize = WFSAppIconSize * 0.52;
+				[glyph drawInRect:CGRectMake((WFSAppIconSize - glyphSize) / 2.0, (WFSAppIconSize - glyphSize) / 2.0, glyphSize, glyphSize)];
+			}
+		}];
+	});
+	return placeholder;
+}
+
+- (instancetype)initWithStyle:(UITableViewCellStyle)style reuseIdentifier:(NSString*)reuseIdentifier
+{
+	self = [super initWithStyle:style reuseIdentifier:reuseIdentifier];
+	if (self)
+	{
+		self.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
+		_appIconView = [[UIImageView alloc] init];
+		_appIconView.contentMode = UIViewContentModeScaleAspectFill;
+		_appIconView.layer.cornerRadius = WFSAppIconCornerRadius;
+		_appIconView.layer.masksToBounds = YES;
+		_appIconView.layer.borderWidth = 0.5;
+		_appIconView.layer.borderColor = [UIColor separatorColor].CGColor;
+		[self.contentView addSubview:_appIconView];
+	}
+	return self;
+}
+
+- (void)layoutSubviews
+{
+	[super layoutSubviews];
+	CGFloat height = self.contentView.bounds.size.height;
+	CGFloat side = MIN(WFSAppIconSize, height - 12);
+	_appIconView.frame = CGRectMake(16, (height - side) / 2.0, side, side);
+	CGFloat labelX = 16 + side + 12;
+	CGFloat labelWidth = self.contentView.bounds.size.width - labelX - 12;
+	if (self.accessoryType != UITableViewCellAccessoryNone)
+	{
+		labelWidth -= 30;
+	}
+	CGRect titleFrame = self.textLabel.frame;
+	titleFrame.origin.x = labelX;
+	titleFrame.size.width = labelWidth;
+	self.textLabel.frame = titleFrame;
+	CGRect detailFrame = self.detailTextLabel.frame;
+	detailFrame.origin.x = labelX;
+	detailFrame.size.width = labelWidth;
+	self.detailTextLabel.frame = detailFrame;
+}
+
+@end
+
 @interface WFSPurchasedAppsViewController ()
 @property (nonatomic, copy) void (^selectionHandler)(long long appId, NSDictionary* metadataPlist);
 @property (nonatomic, strong) NSMutableArray* allApps;
@@ -376,8 +451,186 @@ static NSString* const WFSPurchasedCellIdentifier = @"WFSPurchasedCellIdentifier
 		__strong typeof(weakSelf) self = weakSelf;
 		self.didLoadHistory = YES;
 		[self refreshInstalledBundleIDs];
-		[self mergeDevicePurchasesWithApps:apps dsid:dsid];
+		[self fetchCommerceHistoryAndMergeWithApps:apps dsid:dsid];
 	});
+}
+
+- (void)fetchCommerceHistoryAndMergeWithApps:(NSArray*)apps dsid:(long long)dsid
+{
+	WFSAppleIDDownloader* downloader = [WFSAppleIDDownloader sharedDownloader];
+	if (!downloader.isAuthenticated)
+	{
+		[self mergeDevicePurchasesWithApps:apps dsid:dsid];
+		return;
+	}
+	self.statusLabel.hidden = NO;
+	self.statusLabel.text = @"Loading Apple ID purchase history…";
+	self.statusLabel.textColor = [UIColor secondaryLabelColor];
+	__weak typeof(self) weakSelf = self;
+	[self fetchCommerceYearsFromYear:2008 toYear:[self currentYear] purchases:[NSMutableArray array] completion:^(NSArray* purchases, NSError* error)
+	{
+		__strong typeof(self) self = weakSelf;
+		if (!self)
+		{
+			return;
+		}
+		if (error)
+		{
+			NSLog(@"[WaffleStore] Purchases: commerce history error %ld %@", (long)error.code, error.localizedDescription);
+		}
+		NSMutableArray* merged = [NSMutableArray arrayWithArray:apps];
+		NSMutableSet* seenStoreIDs = [NSMutableSet new];
+		for (ASDPurchaseHistoryApp* app in apps)
+		{
+			if (app.storeItemID > 0)
+			{
+				[seenStoreIDs addObject:@(app.storeItemID)];
+			}
+		}
+		for (NSDictionary* purchase in purchases)
+		{
+			if (![purchase isKindOfClass:[NSDictionary class]])
+			{
+				continue;
+			}
+			long long adamId = [purchase[@"adamId"] longLongValue];
+			if (adamId <= 0 || [seenStoreIDs containsObject:@(adamId)])
+			{
+				continue;
+			}
+			ASDPurchaseHistoryApp* app = [self historyAppFromCommerceEntry:purchase];
+			if (!app)
+			{
+				continue;
+			}
+			[seenStoreIDs addObject:@(adamId)];
+			[merged addObject:app];
+		}
+		if (purchases.count)
+		{
+			NSLog(@"[WaffleStore] Purchases: merged %lu Apple ID purchase(s), total %lu", (unsigned long)purchases.count, (unsigned long)merged.count);
+		}
+		[self mergeDevicePurchasesWithApps:merged dsid:dsid];
+	}];
+}
+
+- (void)fetchCommerceYearsFromYear:(NSInteger)year toYear:(NSInteger)toYear purchases:(NSMutableArray*)purchases completion:(void (^)(NSArray* purchases, NSError* error))completion
+{
+	if (year > toYear)
+	{
+		completion(purchases, nil);
+		return;
+	}
+	__weak typeof(self) weakSelf = self;
+	[self fetchCommercePagesForRange:[NSString stringWithFormat:@"%ld-all", (long)year] token:nil purchases:[NSMutableArray array] completion:^(NSArray* yearPurchases, NSError* error)
+	{
+		__strong typeof(self) self = weakSelf;
+		if (!self)
+		{
+			completion(purchases, error);
+			return;
+		}
+		if (error)
+		{
+			completion(purchases, error);
+			return;
+		}
+		[purchases addObjectsFromArray:yearPurchases];
+		[self fetchCommerceYearsFromYear:year + 1 toYear:toYear purchases:purchases completion:completion];
+	}];
+}
+
+- (void)fetchCommercePagesForRange:(NSString*)range token:(NSString*)token purchases:(NSMutableArray*)purchases completion:(void (^)(NSArray* purchases, NSError* error))completion
+{
+	WFSAppleIDDownloader* downloader = [WFSAppleIDDownloader sharedDownloader];
+	NSInteger page = token.length ? 2 : 1;
+	__weak typeof(self) weakSelf = self;
+	[downloader fetchCommercePurchaseHistoryWithRange:range page:page paginationToken:token completion:^(NSArray* pagePurchases, NSDictionary* response, NSError* error)
+	{
+		__strong typeof(self) self = weakSelf;
+		if (!self)
+		{
+			completion(purchases, error);
+			return;
+		}
+		if (error)
+		{
+			completion(purchases, error);
+			return;
+		}
+		[purchases addObjectsFromArray:pagePurchases];
+		BOOL complete = [response[@"is-complete"] respondsToSelector:@selector(boolValue)] && [response[@"is-complete"] boolValue];
+		NSString* nextToken = nil;
+		if (!complete)
+		{
+			id tokenValue = response[@"pagination-token"];
+			if ([tokenValue isKindOfClass:[NSString class]] && ((NSString*)tokenValue).length)
+			{
+				nextToken = (NSString*)tokenValue;
+			}
+		}
+		if (nextToken && purchases.count < 1000)
+		{
+			dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.4 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^
+			{
+				[self fetchCommercePagesForRange:range token:nextToken purchases:purchases completion:completion];
+			});
+			return;
+		}
+		completion(purchases, nil);
+	}];
+}
+
+- (ASDPurchaseHistoryApp*)historyAppFromCommerceEntry:(NSDictionary*)entry
+{
+	@try
+	{
+		Class appClass = NSClassFromString(@"ASDPurchaseHistoryApp");
+		if (!appClass)
+		{
+			return nil;
+		}
+		ASDPurchaseHistoryApp* app = [appClass new];
+		long long adamId = [entry[@"adamId"] longLongValue];
+		NSString* bundleId = entry[@"bundleId"];
+		NSString* title = entry[@"title"];
+		NSString* purchaseDate = entry[@"purchaseDate"];
+		NSDate* date = nil;
+		if ([purchaseDate isKindOfClass:[NSString class]] && purchaseDate.length)
+		{
+			NSDateFormatter* formatter = [NSDateFormatter new];
+			formatter.locale = [NSLocale localeWithLocaleIdentifier:@"en_US_POSIX"];
+			formatter.dateFormat = @"yyyy-MM-dd'T'HH:mm:ssZZZZZ";
+			date = [formatter dateFromString:purchaseDate];
+		}
+		if (adamId > 0)
+		{
+			[app setValue:@(adamId) forKey:@"storeItemID"];
+		}
+		if (bundleId.length)
+		{
+			[app setValue:bundleId forKey:@"bundleID"];
+		}
+		if (title.length)
+		{
+			[app setValue:title forKey:@"title"];
+		}
+		if (date)
+		{
+			[app setValue:date forKey:@"datePurchased"];
+		}
+		return app;
+	}
+	@catch (NSException* exception)
+	{
+		NSLog(@"[WaffleStore] Purchases: historyAppFromCommerceEntry exception %@ %@", exception.name, exception.reason);
+		return nil;
+	}
+}
+
+- (NSInteger)currentYear
+{
+	return [[NSCalendar currentCalendar] component:NSCalendarUnitYear fromDate:[NSDate date]];
 }
 
 - (void)mergeDevicePurchasesWithApps:(NSArray*)apps dsid:(long long)dsid
@@ -929,13 +1182,17 @@ static NSString* const WFSPurchasedCellIdentifier = @"WFSPurchasedCellIdentifier
 	{
 		urlString = app.circularIconURLString;
 	}
-	UIImage* placeholder = [UIImage systemImageNamed:@"app"];
-	cell.imageView.image = placeholder;
-	cell.imageView.contentMode = UIViewContentModeScaleAspectFit;
-	cell.imageView.layer.cornerRadius = 9;
-	cell.imageView.layer.masksToBounds = YES;
-	cell.imageView.layer.borderWidth = 0.5;
-	cell.imageView.layer.borderColor = [UIColor separatorColor].CGColor;
+	UIImageView* iconView = nil;
+	if ([cell isKindOfClass:[WFSPurchasedAppCell class]])
+	{
+		iconView = ((WFSPurchasedAppCell*)cell).appIconView;
+	}
+	else
+	{
+		iconView = cell.imageView;
+	}
+	iconView.image = [WFSPurchasedAppCell applePlaceholderImage];
+	iconView.contentMode = UIViewContentModeScaleAspectFill;
 	if (urlString.length == 0)
 	{
 		return;
@@ -943,7 +1200,7 @@ static NSString* const WFSPurchasedCellIdentifier = @"WFSPurchasedCellIdentifier
 	UIImage* cached = [self.imageCache objectForKey:urlString];
 	if (cached)
 	{
-		cell.imageView.image = cached;
+		iconView.image = cached;
 		return;
 	}
 	NSURL* url = [NSURL URLWithString:urlString];
@@ -969,7 +1226,7 @@ static NSString* const WFSPurchasedCellIdentifier = @"WFSPurchasedCellIdentifier
 		{
 			if (cell.tag == row)
 			{
-				cell.imageView.image = image;
+				iconView.image = image;
 			}
 		});
 	}];
@@ -1071,8 +1328,7 @@ static NSString* const WFSPurchasedCellIdentifier = @"WFSPurchasedCellIdentifier
 	UITableViewCell* cell = [tableView dequeueReusableCellWithIdentifier:WFSPurchasedCellIdentifier];
 	if (!cell)
 	{
-		cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:WFSPurchasedCellIdentifier];
-		cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
+		cell = [[WFSPurchasedAppCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:WFSPurchasedCellIdentifier];
 	}
 	ASDPurchaseHistoryApp* app = self.visibleApps[indexPath.row];
 	cell.textLabel.text = app.title.length ? app.title : app.bundleID;
@@ -1104,6 +1360,17 @@ static NSString* const WFSPurchasedCellIdentifier = @"WFSPurchasedCellIdentifier
 	}
 	UIAlertController* alert = [UIAlertController alertControllerWithTitle:title message:[NSString stringWithFormat:@"%@\nChoose a version to download or downgrade.", [self statusForApp:app]] preferredStyle:UIAlertControllerStyleAlert];
 	__weak typeof(self) weakSelf = self;
+	if ([self.removedStoreIDs containsObject:@(app.storeItemID)] && self.appleIDDownloadHandler)
+	{
+		[alert addAction:[UIAlertAction actionWithTitle:@"Download with Apple ID" style:UIAlertActionStyleDefault handler:^(UIAlertAction* action)
+		{
+			__strong typeof(weakSelf) self = weakSelf;
+			if (self.appleIDDownloadHandler)
+			{
+				self.appleIDDownloadHandler(app.storeItemID);
+			}
+		}]];
+	}
 	[alert addAction:[UIAlertAction actionWithTitle:@"Choose Version" style:UIAlertActionStyleDefault handler:^(UIAlertAction* action)
 	{
 		__strong typeof(weakSelf) self = weakSelf;

@@ -45,6 +45,25 @@
 	{
 		_specifiers = [NSMutableArray new];
 
+		PSSpecifier* appleIdGroupSpecifier = [PSSpecifier emptyGroupSpecifier];
+		appleIdGroupSpecifier.name = @"Apple ID";
+		[_specifiers addObject:appleIdGroupSpecifier];
+
+		PSSpecifier* signInSpecifier = [PSSpecifier preferenceSpecifierNamed:@"Sign in to Apple ID" target:self set:nil get:nil detail:nil cell:PSButtonCell edit:nil];
+		signInSpecifier.identifier = @"signIn";
+		[signInSpecifier setProperty:@YES forKey:@"enabled"];
+		signInSpecifier.buttonAction = @selector(signInToAppleID);
+		[_specifiers addObject:signInSpecifier];
+
+		PSSpecifier* appleIdDownloadSpecifier = [PSSpecifier preferenceSpecifierNamed:@"Download with Apple ID" target:self set:nil get:nil detail:nil cell:PSButtonCell edit:nil];
+		appleIdDownloadSpecifier.identifier = @"appleIdDownload";
+		[appleIdDownloadSpecifier setProperty:@YES forKey:@"enabled"];
+		appleIdDownloadSpecifier.buttonAction = @selector(downloadWithAppleID);
+		[_specifiers addObject:appleIdDownloadSpecifier];
+
+		NSString* appleIdFooterText = @"Sign in with the Apple ID that owns the app licenses to fetch versions and download removed apps directly from Apple.";
+		[appleIdGroupSpecifier setProperty:appleIdFooterText forKey:@"footerText"];
+
 		PSSpecifier* downloadGroupSpecifier = [PSSpecifier emptyGroupSpecifier];
 		downloadGroupSpecifier.name = @"Download";
 		[_specifiers addObject:downloadGroupSpecifier];
@@ -643,6 +662,68 @@
 }
 
 #pragma mark - Apple ID download
+
+- (void)signInToAppleID
+{
+	WFSAppleIDDownloader* downloader = [WFSAppleIDDownloader sharedDownloader];
+	if (downloader.isAuthenticated)
+	{
+		[self showAlert:@"Already Signed In" message:[NSString stringWithFormat:@"You are signed in as %@.\n\nThis session is used to fetch versions and download removed apps directly from Apple.", downloader.authenticatedAppleId.length ? downloader.authenticatedAppleId : @"your Apple ID"]];
+		return;
+	}
+	[self promptAppleIDCredentialsWithCompletion:^(BOOL success)
+	{
+		if (success)
+		{
+			[self showAlert:@"Signed In" message:@"You are signed in to Apple.\n\nYou can now use Download with Apple ID for removed apps, and your purchase history is synced into the Purchased tab."];
+		}
+	}];
+}
+
+- (void)downloadWithAppleID
+{
+	if (![self isNetworkReachable])
+	{
+		[self showAlert:@"No Internet" message:@"Please check your internet connection and try again."];
+		return;
+	}
+	UIAlertController* linkAlert = [UIAlertController alertControllerWithTitle:@"App Link" message:@"Enter the App Store link or App ID of the app you want to download with your Apple ID." preferredStyle:UIAlertControllerStyleAlert];
+	[linkAlert addTextFieldWithConfigurationHandler:^(UITextField* textField)
+	{
+		textField.placeholder = @"https://apps.apple.com/app/idXXXXXXXXX";
+		textField.autocapitalizationType = UITextAutocapitalizationTypeNone;
+		textField.autocorrectionType = UITextAutocorrectionTypeNo;
+	}];
+	UIAlertAction* downloadAction = [UIAlertAction actionWithTitle:@"Continue" style:UIAlertActionStyleDefault handler:^(UIAlertAction* action)
+	{
+		NSString* input = [linkAlert.textFields.firstObject.text stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+		if (input.length == 0)
+		{
+			[self showAlert:@"Error" message:@"Please enter an App Store link or App ID."];
+			return;
+		}
+		NSCharacterSet* digits = [NSCharacterSet decimalDigitCharacterSet];
+		long long appId = 0;
+		if ([input rangeOfCharacterFromSet:digits.invertedSet].location == NSNotFound)
+		{
+			appId = [input longLongValue];
+		}
+		else
+		{
+			appId = [self parseAppIdFromLink:input];
+		}
+		if (appId <= 0)
+		{
+			[self showAlert:@"Error" message:@"Invalid link"];
+			return;
+		}
+		[self startAppleIDDownloadForAppId:appId];
+	}];
+	[linkAlert addAction:downloadAction];
+	UIAlertAction* cancelAction = [UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil];
+	[linkAlert addAction:cancelAction];
+	[self wfsPresentViewController:linkAlert];
+}
 
 - (void)startAppleIDDownloadForAppId:(long long)appId
 {
