@@ -69,7 +69,7 @@ static BOOL WFSSpawnWithTimeout(NSArray* arguments, NSTimeInterval timeout, BOOL
 	return WIFEXITED(status) && WEXITSTATUS(status) == 0;
 }
 
-static NSInteger WFSSpawnRootWithTimeout(NSArray* arguments, NSTimeInterval timeout, BOOL* cancelled, NSString** output, void (^progressHandler)(NSString* message))
+static NSInteger WFSSpawnRootWithTimeout(NSArray* arguments, NSTimeInterval timeout, BOOL* cancelled, NSString** output, int* spawnErrnoOut, void (^progressHandler)(NSString* message))
 {
 	NSMutableArray* allArguments = [NSMutableArray arrayWithArray:arguments];
 	[allArguments insertObject:arguments.firstObject atIndex:0];
@@ -113,6 +113,10 @@ static NSInteger WFSSpawnRootWithTimeout(NSArray* arguments, NSTimeInterval time
 	{
 		close(outPipe[0]);
 		close(outPipe[1]);
+		if (spawnErrnoOut)
+		{
+			*spawnErrnoOut = spawnResult;
+		}
 		return -200;
 	}
 	close(outPipe[1]);
@@ -1775,11 +1779,11 @@ static uint64_t wfsReadU64(const uint8_t* bytes, BOOL bigEndian)
 		{
 			[self appendToInstallLog:[NSString stringWithFormat:@"[%@] %@ is FairPlay-encrypted; install requires on-device App Store account to match the download account.\n---\n", [NSDate date], path]];
 		}
-		[self installIPAAutomaticallyAtPath:path];
+		[self installIPAAutomaticallyAtPath:path encrypted:verification[@"encrypted"] != nil];
 	});
 }
 
-- (void)installIPAAutomaticallyAtPath:(NSString*)path
+- (void)installIPAAutomaticallyAtPath:(NSString*)path encrypted:(BOOL)encrypted
 {
 	__block BOOL cancelled = NO;
 	__block BOOL finished = NO;
@@ -1797,11 +1801,12 @@ static uint64_t wfsReadU64(const uint8_t* bytes, BOOL bigEndian)
 		}
 		NSString* executablePath = [NSBundle mainBundle].executablePath;
 		NSString* childOutput = nil;
-		NSInteger exitCode = WFSSpawnRootWithTimeout(@[ executablePath, @"--wfs-install", path ], 240.0, &cancelled, &childOutput, ^(NSString* message)
+		int spawnErrno = 0;
+		NSInteger exitCode = WFSSpawnRootWithTimeout(@[ executablePath, @"--wfs-install", path ], 240.0, &cancelled, &childOutput, &spawnErrno, ^(NSString* message)
 		{
 			[self updateInstallProgressMessage:message];
 		});
-		[self appendToInstallLog:[NSString stringWithFormat:@"[%@] install of %@ -> exit %ld\n%@\n---\n", [NSDate date], path, (long)exitCode, childOutput ?: @"(no output)"]];
+		[self appendToInstallLog:[NSString stringWithFormat:@"[%@] install of %@ -> exit %ld (spawn errno %d, encrypted %d)\n%@\n---\n", [NSDate date], path, (long)exitCode, spawnErrno, encrypted, childOutput ?: @"(no output)"]];
 		if (cancelled)
 		{
 			[self finishInstallWithMessage:[NSString stringWithFormat:@"Install cancelled. The .ipa is saved to:\n%@", path] title:@"Cancelled" path:path finished:&finished];
@@ -1814,7 +1819,19 @@ static uint64_t wfsReadU64(const uint8_t* bytes, BOOL bigEndian)
 		}
 		if (exitCode == -200 || exitCode == -400)
 		{
-			[self installIPAAutomaticallyManuallyAtPath:path cancelled:&cancelled finished:&finished];
+			NSString* errnoText = [NSString stringWithFormat:@"error %d (%s)", spawnErrno, strerror(spawnErrno)];
+			if (spawnErrno == 1)
+			{
+				[self finishInstallWithMessage:[NSString stringWithFormat:@"The system installer could not run as root (%@).\n\nThis happens on iOS 17.6+ or when WaffleStore was not reinstalled after the root-install update. Reinstall WaffleStore via TrollStore, then try again.\n\nThe .ipa is saved to:\n%@", errnoText, path] title:@"Root Installer Blocked" path:path finished:&finished];
+				return;
+			}
+			if (!encrypted)
+			{
+				[self appendToInstallLog:[NSString stringWithFormat:@"[%@] root installer unavailable (%@); falling back to manual install for unencrypted app\n", [NSDate date], errnoText]];
+				[self installIPAAutomaticallyManuallyAtPath:path cancelled:&cancelled finished:&finished];
+				return;
+			}
+			[self finishInstallWithMessage:[NSString stringWithFormat:@"The system installer could not run as root (%@). DRM-encrypted apps can only be installed by the system installer, so a manual install would not work.\n\nSign into the App Store on this device with the Apple ID that downloaded the app, then try again. Or install the .ipa with TrollStore or Filza.\n\nSaved .ipa:\n%@", errnoText, path] title:@"Install Failed" path:path finished:&finished];
 			return;
 		}
 		if (exitCode == 0)
@@ -1833,7 +1850,7 @@ static uint64_t wfsReadU64(const uint8_t* bytes, BOOL bigEndian)
 		}
 		[self finishInstallWithMessage:[NSString stringWithFormat:@"The system installer failed: %@\n\nThe .ipa is saved to:\n%@\n\nPaid apps require the device to be signed into the App Store with the same Apple ID. You can also install it with TrollStore or Filza.", errorText, path] title:@"Install Failed" path:path finished:&finished];
 	});
-	dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(300 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^
+	dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(420 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^
 	{
 		if (!finished)
 		{
@@ -2070,6 +2087,12 @@ static uint64_t wfsReadU64(const uint8_t* bytes, BOOL bigEndian)
 	BOOL extractedAll = YES;
 	NSUInteger entryIndex = 0;
 	NSUInteger totalEntries = fileEntries.count;
+	uint64_t totalCompressed = 0;
+	for (NSDictionary* entry in fileEntries)
+	{
+		totalCompressed += [entry[@"compSize"] unsignedLongLongValue];
+	}
+	[self appendToInstallLog:[NSString stringWithFormat:@"[%@] manual extraction started: %lu entries, ~%.1f MB compressed, %llu bytes total\n", [NSDate date], (unsigned long)totalEntries, (double)totalCompressed / 1048576.0, fileSize]];
 	for (NSDictionary* entry in fileEntries)
 	{
 		if (cancelled && *cancelled)
@@ -2114,7 +2137,7 @@ static uint64_t wfsReadU64(const uint8_t* bytes, BOOL bigEndian)
 				long long remaining = compSize;
 				while (remaining > 0)
 				{
-					NSData* chunk = [readHandle readDataOfLength:(NSUInteger)MIN(remaining, 1048576LL)];
+					NSData* chunk = [readHandle readDataOfLength:(NSUInteger)MIN(remaining, 4194304LL)];
 					if (chunk.length == 0)
 					{
 						break;
@@ -2142,6 +2165,10 @@ static uint64_t wfsReadU64(const uint8_t* bytes, BOOL bigEndian)
 		if (progressHandler)
 		{
 			progressHandler(entryIndex, totalEntries);
+		}
+		if (entryIndex % 50 == 0 || entryIndex == totalEntries)
+		{
+			[self appendToInstallLog:[NSString stringWithFormat:@"[%@] extracting %lu of %lu entries (%@)\n", [NSDate date], (unsigned long)entryIndex, (unsigned long)totalEntries, entryName]];
 		}
 	}
 	[readHandle closeFile];
@@ -2171,8 +2198,8 @@ static uint64_t wfsReadU64(const uint8_t* bytes, BOOL bigEndian)
 		[outHandle closeFile];
 		return NO;
 	}
-	uint8_t inBuffer[65536];
-	uint8_t outBuffer[65536];
+	uint8_t inBuffer[262144];
+	uint8_t outBuffer[262144];
 	uint32_t remaining = compressedSize;
 	int ret = Z_OK;
 	while (remaining > 0 && ret != Z_STREAM_END)
