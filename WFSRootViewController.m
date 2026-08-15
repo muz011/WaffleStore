@@ -28,6 +28,7 @@ extern int posix_spawnattr_set_persona_gid_np(const posix_spawnattr_t* __restric
 typedef int (*WFSJBInitFn)(void);
 typedef int (*WFSJBClientCloseFn)(void);
 typedef int (*WFSJBClientSpawnFn)(uid_t uid, gid_t gid, int argc, char** argv, void (^callback)(pid_t pid));
+typedef int (*WFSJBPersonaFixFn)(int childPid, uid_t overwriteUid, gid_t overwriteGid);
 
 static NSNumber* wfsEffectiveEntitlement(NSString* key)
 {
@@ -58,7 +59,11 @@ static void* wfsJailbreakdHandle(void)
 	static dispatch_once_t onceToken;
 	dispatch_once(&onceToken, ^
 	{
-		cachedHandle = dlopen("/var/jb/usr/lib/libjailbreak.dylib", RTLD_LAZY);
+		cachedHandle = dlopen("/var/jb/basebin/libjailbreak.dylib", RTLD_LAZY);
+		if (!cachedHandle)
+		{
+			cachedHandle = dlopen("/var/jb/usr/lib/libjailbreak.dylib", RTLD_LAZY);
+		}
 		if (!cachedHandle)
 		{
 			cachedHandle = dlopen("/jb/libjailbreak.dylib", RTLD_LAZY);
@@ -321,6 +326,86 @@ static NSInteger WFSSpawnRootWithTimeout(NSArray* arguments, NSString* logFilePa
 	}
 
 	start = [NSProcessInfo processInfo].systemUptime;
+	WFSJBPersonaFixFn personaFix = (WFSJBPersonaFixFn)dlsym(RTLD_DEFAULT, "jbclient_persona_fix");
+	void* jbHandleForPersonaFix = wfsJailbreakdHandle();
+	if (!personaFix && jbHandleForPersonaFix)
+	{
+		personaFix = (WFSJBPersonaFixFn)dlsym(jbHandleForPersonaFix, "jbclient_persona_fix");
+	}
+	if (personaFix)
+	{
+		if (outputHandler)
+		{
+			outputHandler(@"WFS_JB: jbclient_persona_fix available; trying persona+dopamine-fix\n");
+		}
+		posix_spawnattr_t attributes;
+		posix_spawnattr_init(&attributes);
+		posix_spawnattr_set_persona_np(&attributes, 99, WFS_PERSONA_FLAGS_OVERRIDE);
+		posix_spawnattr_set_persona_uid_np(&attributes, 501);
+		posix_spawnattr_set_persona_gid_np(&attributes, 501);
+		posix_spawnattr_setflags(&attributes, POSIX_SPAWN_START_SUSPENDED);
+		pid_t pid = 0;
+		int spawnResult = posix_spawn(&pid, argv[0], NULL, &attributes, argv, NULL);
+		posix_spawnattr_destroy(&attributes);
+		if (spawnResult == 0)
+		{
+			int fixResult = personaFix(pid, 0, 0);
+			kill(pid, SIGCONT);
+			if (outputHandler)
+			{
+				outputHandler([NSString stringWithFormat:@"WFS_JB: persona fix returned %d\n", fixResult]);
+			}
+			if (methodUsedOut)
+			{
+				*methodUsedOut = @"persona+dopamine-fix";
+			}
+			int status = 0;
+			NSInteger resultCode = -300;
+			while (waitpid(pid, &status, WNOHANG) == 0)
+			{
+				if (cancelled && *cancelled)
+				{
+					kill(pid, SIGKILL);
+					waitpid(pid, &status, 0);
+					resultCode = -301;
+					break;
+				}
+				if ([NSProcessInfo processInfo].systemUptime - start > timeout)
+				{
+					kill(pid, SIGKILL);
+					waitpid(pid, &status, 0);
+					resultCode = -300;
+					break;
+				}
+				wfsDrainLogFile(logFilePath, &logCursor, outputHandler, progressHandler);
+				nanosleep(&sleepTime, NULL);
+			}
+			wfsDrainLogFile(logFilePath, &logCursor, outputHandler, progressHandler);
+			if (resultCode != -300 && resultCode != -301)
+			{
+				resultCode = WIFEXITED(status) ? WEXITSTATUS(status) : -300;
+			}
+			if (output)
+			{
+				*output = [[NSString alloc] initWithContentsOfFile:logFilePath encoding:NSUTF8StringEncoding error:nil];
+			}
+			free(argv);
+			return resultCode;
+		}
+		if (outputHandler)
+		{
+			outputHandler([NSString stringWithFormat:@"WFS_JB: persona+dopamine-fix spawn failed (%d); falling through to plain persona\n", spawnResult]);
+		}
+	}
+	else
+	{
+		if (outputHandler)
+		{
+			outputHandler(@"WFS_JB: jbclient_persona_fix unavailable; using plain persona\n");
+		}
+	}
+
+	start = [NSProcessInfo processInfo].systemUptime;
 	posix_spawnattr_t attributes;
 	posix_spawnattr_init(&attributes);
 	posix_spawnattr_set_persona_np(&attributes, 99, WFS_PERSONA_FLAGS_OVERRIDE);
@@ -412,6 +497,8 @@ static NSInteger WFSSpawnRootWithTimeout(NSArray* arguments, NSString* logFilePa
 @property (nonatomic, strong) UIProgressView* downloadProgressView;
 @property (nonatomic, strong) NSURLSession* ipaDownloadSession;
 @property (nonatomic, copy) NSString* pendingDownloadFilename;
+@property (nonatomic, assign) long long pendingDownloadAppId;
+@property (nonatomic, assign) long long pendingDownloadVersionId;
 @end
 
 @implementation WFSRootViewController
@@ -1456,6 +1543,8 @@ static NSInteger WFSSpawnRootWithTimeout(NSArray* arguments, NSString* logFilePa
 		return;
 	}
 	self.pendingDownloadFilename = [NSString stringWithFormat:@"app-%lld-v%lld.ipa", appId, versionId];
+	self.pendingDownloadAppId = appId;
+	self.pendingDownloadVersionId = versionId;
 	[self showDownloadProgressWithMessage:@"Getting download link from Apple…"];
 	[self appendToInstallLog:[NSString stringWithFormat:@"[%@] download start: adamId=%lld versionId=%lld\n", [NSDate date], appId, versionId]];
 	[[WFSAppleIDDownloader sharedDownloader] getDownloadInfoForAdamId:appId versionId:versionId autoPurchase:YES completion:^(NSURL* ipaURL, NSDictionary* metadata, NSError* error)
@@ -2020,8 +2109,43 @@ static uint64_t wfsReadU64(const uint8_t* bytes, BOOL bigEndian)
 		if (verification[@"encrypted"])
 		{
 			[self appendToInstallLog:[NSString stringWithFormat:@"[%@] %@ is FairPlay-encrypted; install requires on-device App Store account to match the download account.\n---\n", [NSDate date], path]];
+			[self promptInstallMethodForPath:path];
+			return;
 		}
 		[self installIPAAutomaticallyAtPath:path encrypted:verification[@"encrypted"] != nil];
+	});
+}
+
+- (void)promptInstallMethodForPath:(NSString*)path
+{
+	long long appId = self.pendingDownloadAppId;
+	long long versionId = self.pendingDownloadVersionId;
+	dispatch_async(dispatch_get_main_queue(), ^
+	{
+		UIAlertController* alert = [UIAlertController alertControllerWithTitle:@"Install" message:@"Choose how to install this encrypted app.\n\nInstall via Apple: Apple's own installer downloads and installs the app for the on-device App Store account — no root needed. Works only while Apple still serves this app.\n\nInstall via system installer: installs this exact .ipa file through the system installer (requires root/jailbreak). Works even for delisted apps." preferredStyle:UIAlertControllerStyleAlert];
+		UIAlertAction* appleAction = [UIAlertAction actionWithTitle:@"Install via Apple (no root)" style:UIAlertActionStyleDefault handler:^(UIAlertAction* action)
+		{
+			if (appId > 0)
+			{
+				[self downloadAppWithAppId:appId versionId:versionId];
+			}
+			else
+			{
+				[self installIPAAutomaticallyAtPath:path encrypted:YES];
+			}
+		}];
+		[alert addAction:appleAction];
+		UIAlertAction* systemAction = [UIAlertAction actionWithTitle:@"Install via system installer (root)" style:UIAlertActionStyleDefault handler:^(UIAlertAction* action)
+		{
+			[self installIPAAutomaticallyAtPath:path encrypted:YES];
+		}];
+		[alert addAction:systemAction];
+		UIAlertAction* saveAction = [UIAlertAction actionWithTitle:@"Just Save" style:UIAlertActionStyleCancel handler:^(UIAlertAction* action)
+		{
+			[self showAlert:@"Saved" message:[NSString stringWithFormat:@"The .ipa is saved to:\n%@\n\nInstall it with TrollStore or Filza.", path]];
+		}];
+		[alert addAction:saveAction];
+		[self wfsPresentViewController:alert];
 	});
 }
 
@@ -2168,8 +2292,14 @@ static uint64_t wfsReadU64(const uint8_t* bytes, BOOL bigEndian)
 
 - (void)appendToInstallLog:(NSString*)line
 {
+	static dispatch_queue_t installLogQueue = nil;
+	static dispatch_once_t onceToken;
+	dispatch_once(&onceToken, ^
+	{
+		installLogQueue = dispatch_queue_create("org.muz011.wafflestore.installlog", DISPATCH_QUEUE_SERIAL);
+	});
 	NSString* logPath = [[NSHomeDirectory() stringByAppendingPathComponent:@"Documents"] stringByAppendingPathComponent:@"WaffleStore_install.log"];
-	dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^
+	dispatch_async(installLogQueue, ^
 	{
 		NSFileHandle* handle = [NSFileHandle fileHandleForWritingAtPath:logPath];
 		if (!handle)
