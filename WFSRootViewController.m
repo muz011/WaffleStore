@@ -1,6 +1,7 @@
 #import "WFSRootViewController.h"
 #import "WFSVersionPickerViewController.h"
 #import "WFSAppleIDDownloader.h"
+#import "WFSPatchIPA.h"
 #import "CoreServices.h"
 #import <SystemConfiguration/SystemConfiguration.h>
 #import <zlib.h>
@@ -565,8 +566,10 @@ static NSInteger WFSSpawnRootWithTimeout(NSArray* arguments, NSString* logFilePa
 @property (nonatomic, strong) UIProgressView* downloadProgressView;
 @property (nonatomic, strong) NSURLSession* ipaDownloadSession;
 @property (nonatomic, copy) NSString* pendingDownloadFilename;
-@property (nonatomic, assign) long long pendingDownloadAppId;
-@property (nonatomic, assign) long long pendingDownloadVersionId;
+	@property (nonatomic, assign) long long pendingDownloadAppId;
+	@property (nonatomic, assign) long long pendingDownloadVersionId;
+	@property (nonatomic, copy) NSDictionary* pendingDownloadMetadata;
+	@property (nonatomic, copy) NSArray* pendingDownloadSinfs;
 @end
 
 @implementation WFSRootViewController
@@ -1615,7 +1618,7 @@ static NSInteger WFSSpawnRootWithTimeout(NSArray* arguments, NSString* logFilePa
 	self.pendingDownloadVersionId = versionId;
 	[self showDownloadProgressWithMessage:@"Getting download link from Apple…"];
 	[self appendToInstallLog:[NSString stringWithFormat:@"[%@] download start: adamId=%lld versionId=%lld\n", [NSDate date], appId, versionId]];
-	[[WFSAppleIDDownloader sharedDownloader] getDownloadInfoForAdamId:appId versionId:versionId autoPurchase:YES completion:^(NSURL* ipaURL, NSDictionary* metadata, NSError* error)
+	[[WFSAppleIDDownloader sharedDownloader] getDownloadInfoForAdamId:appId versionId:versionId autoPurchase:YES completion:^(NSURL* ipaURL, NSDictionary* metadata, NSArray* sinfs, NSError* error)
 	{
 		if (error)
 		{
@@ -1629,6 +1632,9 @@ static NSInteger WFSSpawnRootWithTimeout(NSArray* arguments, NSString* logFilePa
 			[self showAlert:@"Apple ID Error" message:error.localizedDescription];
 			return;
 		}
+		self.pendingDownloadMetadata = metadata;
+		self.pendingDownloadSinfs = sinfs;
+		[self appendToInstallLog:[NSString stringWithFormat:@"[%@] download link obtained (sinfs: %lu)\n", [NSDate date], (unsigned long)sinfs.count]];
 		NSMutableURLRequest* request = [NSMutableURLRequest requestWithURL:ipaURL];
 		[request setValue:@"Configurator/2.17 (Macintosh; OS X 15.2; 24C5089c) AppleWebKit/0620.1.16.11.6" forHTTPHeaderField:@"User-Agent"];
 		[self appendToInstallLog:[NSString stringWithFormat:@"[%@] download link obtained: %@\n", [NSDate date], ipaURL.absoluteString]];
@@ -1687,6 +1693,16 @@ static NSInteger WFSSpawnRootWithTimeout(NSArray* arguments, NSString* logFilePa
 			[self showAlert:@"Save Failed" message:moveError.localizedDescription];
 			return;
 		}
+		NSError* patchError = nil;
+		BOOL patched = WFSPatchIPAWithSinfData(destination, self.pendingDownloadMetadata, self.pendingDownloadSinfs, [[WFSAppleIDDownloader sharedDownloader] authenticatedAppleId], &patchError);
+		if (patched)
+		{
+			[self appendToInstallLog:[NSString stringWithFormat:@"[%@] ipa patched with SINF + iTunesMetadata\n", [NSDate date]]];
+		}
+		else
+		{
+			[self appendToInstallLog:[NSString stringWithFormat:@"[%@] ipa patch skipped: %@\n", [NSDate date], patchError.localizedDescription]];
+		}
 		[self verifyAndInstallIPAAtPath:destination];
 	});
 }
@@ -1710,6 +1726,8 @@ static NSInteger WFSSpawnRootWithTimeout(NSArray* arguments, NSString* logFilePa
 	{
 		self.ipaDownloadSession = nil;
 		self.pendingDownloadFilename = nil;
+		self.pendingDownloadMetadata = nil;
+		self.pendingDownloadSinfs = nil;
 	}
 }
 

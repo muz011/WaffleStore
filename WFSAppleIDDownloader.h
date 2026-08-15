@@ -22,7 +22,7 @@ typedef NS_ENUM(NSInteger, WFSAppleIDDownloaderErrorCode)
 
 typedef void (^WFSAppleIDAuthCompletion)(NSError* _Nullable error);
 typedef void (^WFSAppleIDVersionsCompletion)(NSArray* _Nullable versions, NSDictionary* _Nullable metadata, NSError* _Nullable error);
-typedef void (^WFSAppleIDDownloadInfoCompletion)(NSURL* _Nullable ipaURL, NSDictionary* _Nullable metadata, NSError* _Nullable error);
+typedef void (^WFSAppleIDDownloadInfoCompletion)(NSURL* _Nullable ipaURL, NSDictionary* _Nullable metadata, NSArray* _Nullable sinfs, NSError* _Nullable error);
 typedef void (^WFSAppleIDPurchaseSearchCompletion)(NSDictionary* _Nullable purchase, NSError* _Nullable error);
 typedef void (^WFSAppleIDVersionsInfoCompletion)(NSArray* _Nullable externalVersionIds, NSDictionary* _Nullable metadata, NSError* _Nullable error);
 typedef void (^WFSAppleIDHistoryCompletion)(NSArray* _Nullable purchases, NSDictionary* _Nullable response, NSError* _Nullable error);
