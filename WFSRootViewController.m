@@ -411,6 +411,7 @@ static NSInteger WFSSpawnRootWithTimeout(NSArray* arguments, NSString* logFilePa
 @property (nonatomic, strong) UIProgressView* authProgressView;
 @property (nonatomic, strong) UIProgressView* downloadProgressView;
 @property (nonatomic, strong) NSURLSession* ipaDownloadSession;
+@property (nonatomic, copy) NSString* pendingDownloadFilename;
 @end
 
 @implementation WFSRootViewController
@@ -488,7 +489,7 @@ static NSInteger WFSSpawnRootWithTimeout(NSArray* arguments, NSString* logFilePa
 
 - (BOOL)isNetworkReachable
 {
-	SCNetworkReachabilityRef reachability = SCNetworkReachabilityCreateWithName(NULL, "apis.bilin.eu.org");
+	SCNetworkReachabilityRef reachability = SCNetworkReachabilityCreateWithName(NULL, "itunes.apple.com");
 	SCNetworkReachabilityFlags flags;
 	BOOL reachable = NO;
 	if (SCNetworkReachabilityGetFlags(reachability, &flags))
@@ -807,10 +808,32 @@ static NSInteger WFSSpawnRootWithTimeout(NSArray* arguments, NSString* logFilePa
 			{
 				[self addDownloadProgressBarToAlert:self.progressAlert];
 			}
+			if (self.progressAlert.actions.count == 0 && self.ipaDownloadSession)
+			{
+				[self.progressAlert addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:^(UIAlertAction* action)
+				{
+					[self.ipaDownloadSession invalidateAndCancel];
+					self.ipaDownloadSession = nil;
+					self.pendingDownloadFilename = nil;
+					self.progressAlert = nil;
+					self.downloadProgressView = nil;
+				}]];
+			}
 			return;
 		}
 		self.progressAlert = [UIAlertController alertControllerWithTitle:@"Downloading" message:message preferredStyle:UIAlertControllerStyleAlert];
 		[self addDownloadProgressBarToAlert:self.progressAlert];
+		if (self.ipaDownloadSession)
+		{
+			[self.progressAlert addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:^(UIAlertAction* action)
+			{
+				[self.ipaDownloadSession invalidateAndCancel];
+				self.ipaDownloadSession = nil;
+				self.pendingDownloadFilename = nil;
+				self.progressAlert = nil;
+				self.downloadProgressView = nil;
+			}]];
+		}
 		[self wfsPresentViewController:self.progressAlert];
 	});
 }
@@ -1427,12 +1450,20 @@ static NSInteger WFSSpawnRootWithTimeout(NSArray* arguments, NSString* logFilePa
 		[self showAlert:@"No Internet" message:@"Please check your internet connection and try again."];
 		return;
 	}
+	if (self.ipaDownloadSession)
+	{
+		[self showAlert:@"Already Downloading" message:@"A download is already in progress. Wait for it to finish before starting another."];
+		return;
+	}
+	self.pendingDownloadFilename = [NSString stringWithFormat:@"app-%lld-v%lld.ipa", appId, versionId];
 	[self showDownloadProgressWithMessage:@"Getting download link from Apple…"];
-	[[WFSAppleIDDownloader sharedDownloader] getDownloadInfoForAppId:appId versionId:versionId completion:^(NSURL* ipaURL, NSDictionary* metadata, NSError* error)
+	[self appendToInstallLog:[NSString stringWithFormat:@"[%@] download start: adamId=%lld versionId=%lld\n", [NSDate date], appId, versionId]];
+	[[WFSAppleIDDownloader sharedDownloader] getDownloadInfoForAdamId:appId versionId:versionId autoPurchase:YES completion:^(NSURL* ipaURL, NSDictionary* metadata, NSError* error)
 	{
 		if (error)
 		{
 			[self dismissDownloadProgress];
+			[self appendToInstallLog:[NSString stringWithFormat:@"[%@] download link failed: %@\n", [NSDate date], error.localizedDescription]];
 			if (error.code == WFSAppleIDDownloaderErrorLicenseNotFound)
 			{
 				[self showAlert:@"Not Purchased" message:[NSString stringWithFormat:@"%@\n\nApple only allows downloading apps that are free or that have been purchased with this Apple ID.", error.localizedDescription]];
@@ -1443,8 +1474,10 @@ static NSInteger WFSSpawnRootWithTimeout(NSArray* arguments, NSString* logFilePa
 		}
 		NSMutableURLRequest* request = [NSMutableURLRequest requestWithURL:ipaURL];
 		[request setValue:@"Configurator/2.17 (Macintosh; OS X 15.2; 24C5089c) AppleWebKit/0620.1.16.11.6" forHTTPHeaderField:@"User-Agent"];
+		[self appendToInstallLog:[NSString stringWithFormat:@"[%@] download link obtained: %@\n", [NSDate date], ipaURL.absoluteString]];
 		[self showDownloadProgressBarWithMessage:@"Downloading .ipa…"];
 		NSURLSessionConfiguration* configuration = [NSURLSessionConfiguration defaultSessionConfiguration];
+		configuration.timeoutIntervalForResource = 1800;
 		self.ipaDownloadSession = [NSURLSession sessionWithConfiguration:configuration delegate:self delegateQueue:nil];
 		NSURLSessionDownloadTask* task = [self.ipaDownloadSession downloadTaskWithRequest:request];
 		[task resume];
@@ -1464,7 +1497,27 @@ static NSInteger WFSSpawnRootWithTimeout(NSArray* arguments, NSString* logFilePa
 	{
 		return;
 	}
+	NSHTTPURLResponse* http = (NSHTTPURLResponse*)downloadTask.response;
+	NSInteger statusCode = [http isKindOfClass:[NSHTTPURLResponse class]] ? http.statusCode : 0;
+	NSDictionary* attributes = [[NSFileManager defaultManager] attributesOfItemAtPath:location.path error:nil];
+	unsigned long long fileSize = attributes ? [attributes[NSFileSize] unsignedLongLongValue] : 0;
+	NSFileHandle* handle = [NSFileHandle fileHandleForReadingAtPath:location.path];
+	NSData* prefix = [handle readDataOfLength:4];
+	[handle closeFile];
+	BOOL validZip = prefix.length == 4 && prefix.bytes && ((const uint8_t*)prefix.bytes)[0] == 0x50 && ((const uint8_t*)prefix.bytes)[1] == 0x4B && ((const uint8_t*)prefix.bytes)[2] == 0x03 && ((const uint8_t*)prefix.bytes)[3] == 0x04;
+	if (statusCode < 200 || statusCode >= 300 || fileSize == 0 || !validZip)
+	{
+		[self appendToInstallLog:[NSString stringWithFormat:@"[%@] download rejected: HTTP %ld, %llu bytes, zip=%d\n", [NSDate date], (long)statusCode, fileSize, validZip]];
+		[[NSFileManager defaultManager] removeItemAtURL:location error:nil];
+		dispatch_async(dispatch_get_main_queue(), ^
+		{
+			[self dismissDownloadProgress];
+			[self showAlert:@"Download Failed" message:[NSString stringWithFormat:@"Apple did not return a valid .ipa file (HTTP %ld, %llu bytes). This can happen when the download link has expired — try again.", (long)statusCode, fileSize]];
+		});
+		return;
+	}
 	NSString* destination = [self destinationPathForDownloadTask:downloadTask];
+	[self appendToInstallLog:[NSString stringWithFormat:@"[%@] download complete: %llu bytes, HTTP %ld -> %@\n", [NSDate date], fileSize, (long)statusCode, destination]];
 	NSFileManager* fileManager = [NSFileManager defaultManager];
 	[fileManager removeItemAtPath:destination error:nil];
 	NSError* moveError = nil;
@@ -1485,23 +1538,32 @@ static NSInteger WFSSpawnRootWithTimeout(NSArray* arguments, NSString* logFilePa
 {
 	if (error)
 	{
-		dispatch_async(dispatch_get_main_queue(), ^
+		if (error.code != NSURLErrorCancelled)
 		{
-			[self dismissDownloadProgress];
-			[self showAlert:@"Download Failed" message:error.localizedDescription ?: @"Unknown error."];
-		});
+			[self appendToInstallLog:[NSString stringWithFormat:@"[%@] download task error: %@\n", [NSDate date], error.localizedDescription]];
+			dispatch_async(dispatch_get_main_queue(), ^
+			{
+				[self dismissDownloadProgress];
+				[self showAlert:@"Download Failed" message:error.localizedDescription ?: @"Unknown error."];
+			});
+		}
 	}
 	[session finishTasksAndInvalidate];
 	if (self.ipaDownloadSession == session)
 	{
 		self.ipaDownloadSession = nil;
+		self.pendingDownloadFilename = nil;
 	}
 }
 
 - (NSString*)destinationPathForDownloadTask:(NSURLSessionDownloadTask*)downloadTask
 {
-	NSURL* ipaURL = downloadTask.response.URL ?: downloadTask.originalRequest.URL;
-	NSString* filename = [ipaURL.lastPathComponent length] > 0 ? ipaURL.lastPathComponent : @"app.ipa";
+	NSString* filename = self.pendingDownloadFilename;
+	if (!filename.length)
+	{
+		NSURL* ipaURL = downloadTask.response.URL ?: downloadTask.originalRequest.URL;
+		filename = [ipaURL.lastPathComponent length] > 0 ? ipaURL.lastPathComponent : @"app.ipa";
+	}
 	if (![filename hasSuffix:@".ipa"])
 	{
 		filename = [filename stringByAppendingString:@".ipa"];
