@@ -205,6 +205,10 @@ static NSInteger WFSSpawnRootWithTimeout(NSArray* arguments, NSString* logFilePa
 	// by the com.apple.private.MobileInstallation.allowed entitlement, not by uid, so the
 	// child can install without root. Fall through to root methods on any failure.
 	{
+		if (outputHandler)
+		{
+			outputHandler(@"WFS_JB: build 1c857f8+; trying plain spawn\n");
+		}
 		pid_t pid = 0;
 		int spawnResult = posix_spawn(&pid, argv[0], NULL, NULL, argv, NULL);
 		if (spawnResult == 0)
@@ -255,6 +259,13 @@ static NSInteger WFSSpawnRootWithTimeout(NSArray* arguments, NSString* logFilePa
 			[[NSFileManager defaultManager] removeItemAtPath:logFilePath error:nil];
 			logCursor = 0;
 			start = [NSProcessInfo processInfo].systemUptime;
+		}
+		else
+		{
+			if (outputHandler)
+			{
+				outputHandler([NSString stringWithFormat:@"WFS_JB: plain spawn failed (errno %d); falling through to root methods\n", spawnResult]);
+			}
 		}
 	}
 
