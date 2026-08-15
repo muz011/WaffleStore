@@ -69,7 +69,7 @@ static int wfsRunRootInstall(NSString* ipaPath)
 
 int main(int argc, char *argv[]) {
 	@autoreleasepool {
-		if (geteuid() == 0 && argc >= 3 && strcmp(argv[1], "--wfs-install") == 0)
+		if (argc >= 3 && strcmp(argv[1], "--wfs-install") == 0)
 		{
 			NSString* ipaPath = [NSString stringWithUTF8String:argv[2]];
 			for (int i = 3; i + 1 < argc; i++)

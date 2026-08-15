@@ -201,6 +201,63 @@ static NSInteger WFSSpawnRootWithTimeout(NSArray* arguments, NSString* logFilePa
 	NSTimeInterval start = [NSProcessInfo processInfo].systemUptime;
 	NSUInteger logCursor = 0;
 
+	// Method 1: plain spawn as the current user. MobileInstallationInstall is authorized
+	// by the com.apple.private.MobileInstallation.allowed entitlement, not by uid, so the
+	// child can install without root. Fall through to root methods on any failure.
+	{
+		pid_t pid = 0;
+		int spawnResult = posix_spawn(&pid, argv[0], NULL, NULL, argv, NULL);
+		if (spawnResult == 0)
+		{
+			if (methodUsedOut)
+			{
+				*methodUsedOut = @"plain";
+			}
+			int status = 0;
+			NSInteger resultCode = -300;
+			while (waitpid(pid, &status, WNOHANG) == 0)
+			{
+				if (cancelled && *cancelled)
+				{
+					kill(pid, SIGKILL);
+					waitpid(pid, &status, 0);
+					resultCode = -301;
+					break;
+				}
+				if ([NSProcessInfo processInfo].systemUptime - start > timeout)
+				{
+					kill(pid, SIGKILL);
+					waitpid(pid, &status, 0);
+					resultCode = -300;
+					break;
+				}
+				wfsDrainLogFile(logFilePath, &logCursor, outputHandler, progressHandler);
+				nanosleep(&sleepTime, NULL);
+			}
+			wfsDrainLogFile(logFilePath, &logCursor, outputHandler, progressHandler);
+			if (resultCode != -300 && resultCode != -301)
+			{
+				resultCode = WIFEXITED(status) ? WEXITSTATUS(status) : -300;
+			}
+			if (output)
+			{
+				*output = [[NSString alloc] initWithContentsOfFile:logFilePath encoding:NSUTF8StringEncoding error:nil];
+			}
+			if (resultCode == 0)
+			{
+				free(argv);
+				return resultCode;
+			}
+			if (outputHandler)
+			{
+				outputHandler([NSString stringWithFormat:@"WFS_JB: plain spawn result %ld; falling through to root methods\n", (long)resultCode]);
+			}
+			[[NSFileManager defaultManager] removeItemAtPath:logFilePath error:nil];
+			logCursor = 0;
+			start = [NSProcessInfo processInfo].systemUptime;
+		}
+	}
+
 	void* jbHandle = wfsJailbreakdHandle();
 	if (jbHandle)
 	{
