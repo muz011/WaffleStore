@@ -11,6 +11,16 @@ static void WFSUncaughtExceptionHandler(NSException* exception)
 	[details writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:nil];
 }
 
+static UIImage* WFSImageNamed(NSString* name)
+{
+	SEL selector = NSSelectorFromString(@"systemImageNamed:");
+	if ([UIImage respondsToSelector:selector])
+	{
+		return [UIImage performSelector:selector withObject:name];
+	}
+	return nil;
+}
+
 @implementation WFSAppDelegate
 
 - (BOOL)application:(UIApplication *)application didFinishLaunchingWithOptions:(NSDictionary *)launchOptions {
@@ -19,7 +29,7 @@ static void WFSUncaughtExceptionHandler(NSException* exception)
 
 	WFSRootViewController* downgradeViewController = [WFSRootViewController new];
 	UINavigationController* downgradeNavigationController = [[UINavigationController alloc] initWithRootViewController:downgradeViewController];
-	downgradeNavigationController.tabBarItem = [[UITabBarItem alloc] initWithTitle:@"Downgrade" image:[UIImage systemImageNamed:@"arrow.down.circle"] selectedImage:[UIImage systemImageNamed:@"arrow.down.circle.fill"]];
+	downgradeNavigationController.tabBarItem = [[UITabBarItem alloc] initWithTitle:@"Downgrade" image:WFSImageNamed(@"arrow.down.circle") selectedImage:WFSImageNamed(@"arrow.down.circle.fill")];
 
 	__weak WFSRootViewController* weakDowngradeViewController = downgradeViewController;
 	WFSPurchasedAppsViewController* purchasesViewController = [[WFSPurchasedAppsViewController alloc] initWithSelectionHandler:^(long long appId, NSDictionary* metadataPlist)
@@ -35,16 +45,17 @@ static void WFSUncaughtExceptionHandler(NSException* exception)
 		[weakDowngradeViewController startAppleIDDownloadForAppId:appId];
 	};
 	UINavigationController* purchasesNavigationController = [[UINavigationController alloc] initWithRootViewController:purchasesViewController];
-	purchasesNavigationController.tabBarItem = [[UITabBarItem alloc] initWithTitle:@"Purchased" image:[UIImage systemImageNamed:@"bag"] selectedImage:[UIImage systemImageNamed:@"bag.fill"]];
+	purchasesNavigationController.tabBarItem = [[UITabBarItem alloc] initWithTitle:@"Purchased" image:WFSImageNamed(@"bag") selectedImage:WFSImageNamed(@"bag.fill")];
 
 	UITabBarController* tabBarController = [UITabBarController new];
 	tabBarController.viewControllers = @[downgradeNavigationController, purchasesNavigationController];
-	if (@available(iOS 15.0, *))
+	Class appearanceClass = NSClassFromString(@"UITabBarAppearance");
+	if (appearanceClass)
 	{
-		UITabBarAppearance* appearance = [UITabBarAppearance new];
-		[appearance configureWithDefaultBackground];
-		tabBarController.tabBar.standardAppearance = appearance;
-		tabBarController.tabBar.scrollEdgeAppearance = appearance;
+		id appearance = [appearanceClass new];
+		[appearance performSelector:NSSelectorFromString(@"configureWithDefaultBackground")];
+		[tabBarController.tabBar setValue:appearance forKey:@"standardAppearance"];
+		[tabBarController.tabBar setValue:appearance forKey:@"scrollEdgeAppearance"];
 	}
 	downgradeViewController.wfsPresentingViewController = tabBarController;
 	_tabBarController = tabBarController;

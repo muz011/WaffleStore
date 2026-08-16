@@ -11,7 +11,12 @@
 - (instancetype)initWithVersions:(NSArray *)versions
 					  completion:(WFSVersionPickerCompletion)completion
 {
-	self = [super initWithStyle:UITableViewStyleInsetGrouped];
+	UITableViewStyle style = UITableViewStyleGrouped;
+	if (@available(iOS 13.0, *))
+	{
+		style = (UITableViewStyle)2;
+	}
+	self = [super initWithStyle:style];
 	if (self)
 	{
 		_versions = versions ?: @[];
@@ -36,11 +41,17 @@
 	self.searchController =
 		[[UISearchController alloc] initWithSearchResultsController:nil];
 	self.searchController.searchResultsUpdater = self;
-	self.searchController.obscuresBackgroundDuringPresentation = NO;
+	if ([self.searchController respondsToSelector:@selector(setObscuresBackgroundDuringPresentation:)])
+	{
+		self.searchController.obscuresBackgroundDuringPresentation = NO;
+	}
 	self.searchController.searchBar.placeholder = @"Search versions";
 
-	self.navigationItem.searchController = self.searchController;
-	self.navigationItem.hidesSearchBarWhenScrolling = NO;
+	if ([self.navigationItem respondsToSelector:@selector(setSearchController:)])
+	{
+		self.navigationItem.searchController = self.searchController;
+		self.navigationItem.hidesSearchBarWhenScrolling = NO;
+	}
 	self.definesPresentationContext = YES;
 }
 
@@ -110,8 +121,21 @@
 	NSString *externalIdentifier = [NSString
 		stringWithFormat:@"%@", version[@"external_identifier"] ?: @""];
 	cell.textLabel.text = bundleVersion.length > 0 ? bundleVersion : externalIdentifier;
-	cell.textLabel.font =
-		[UIFont monospacedDigitSystemFontOfSize:15 weight:UIFontWeightRegular];
+	SEL monoFontSelector = NSSelectorFromString(@"monospacedDigitSystemFontOfSize:weight:");
+	if ([UIFont respondsToSelector:monoFontSelector])
+	{
+		CGFloat fontSize = 15.0;
+		CGFloat fontWeight = UIFontWeightRegular;
+		uintptr_t sizeBits = 0;
+		uintptr_t weightBits = 0;
+		memcpy(&sizeBits, &fontSize, sizeof(CGFloat));
+		memcpy(&weightBits, &fontWeight, sizeof(CGFloat));
+		cell.textLabel.font = [UIFont performSelector:monoFontSelector withObject:(id)sizeBits withObject:(id)weightBits];
+	}
+	else
+	{
+		cell.textLabel.font = [UIFont systemFontOfSize:15];
+	}
 	cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
 	return cell;
 }

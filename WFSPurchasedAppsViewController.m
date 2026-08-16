@@ -15,6 +15,17 @@ static dispatch_queue_t WFSMergeQueue(void)
 	return queue;
 }
 
+static UIColor* WFSSecondaryLabelColor(void)
+{
+	UIColor* color = [UIColor grayColor];
+	SEL selector = NSSelectorFromString(@"secondaryLabelColor");
+	if ([UIColor respondsToSelector:selector])
+	{
+		color = [UIColor performSelector:selector];
+	}
+	return color;
+}
+
 static const CGFloat WFSAppIconSize = 44;
 static const CGFloat WFSAppIconCornerRadius = 10;
 
@@ -31,20 +42,36 @@ static const CGFloat WFSAppIconCornerRadius = 10;
 	static dispatch_once_t onceToken;
 	dispatch_once(&onceToken, ^
 	{
-		UIGraphicsImageRenderer* renderer = [[UIGraphicsImageRenderer alloc] initWithSize:CGSizeMake(WFSAppIconSize, WFSAppIconSize)];
-		placeholder = [renderer imageWithActions:^(UIGraphicsImageRendererContext* rendererContext)
+		UIColor* fillColor = [UIColor colorWithWhite:0.9 alpha:1.0];
+		SEL gray5Selector = NSSelectorFromString(@"systemGray5Color");
+		if ([UIColor respondsToSelector:gray5Selector])
 		{
-			UIBezierPath* path = [UIBezierPath bezierPathWithRoundedRect:CGRectMake(0, 0, WFSAppIconSize, WFSAppIconSize) cornerRadius:WFSAppIconCornerRadius];
-			[[UIColor systemGray5Color] setFill];
-			[path fill];
-			UIImage* glyph = [UIImage systemImageNamed:@"app"];
-			if (glyph)
+			fillColor = [UIColor performSelector:gray5Selector];
+		}
+		UIGraphicsBeginImageContextWithOptions(CGSizeMake(WFSAppIconSize, WFSAppIconSize), NO, 0.0);
+		UIBezierPath* path = [UIBezierPath bezierPathWithRoundedRect:CGRectMake(0, 0, WFSAppIconSize, WFSAppIconSize) cornerRadius:WFSAppIconCornerRadius];
+		[fillColor setFill];
+		[path fill];
+		SEL systemImageSelector = NSSelectorFromString(@"systemImageNamed:");
+		if ([UIImage respondsToSelector:systemImageSelector])
+		{
+			UIImage* glyph = [UIImage performSelector:systemImageSelector withObject:@"app"];
+			SEL tintSelector = NSSelectorFromString(@"imageWithTintColor:renderingMode:");
+			if (glyph && [glyph respondsToSelector:tintSelector])
 			{
-				glyph = [glyph imageWithTintColor:[UIColor systemGrayColor] renderingMode:UIImageRenderingModeAlwaysOriginal];
+				UIColor* glyphColor = [UIColor grayColor];
+				SEL graySelector = NSSelectorFromString(@"systemGrayColor");
+				if ([UIColor respondsToSelector:graySelector])
+				{
+					glyphColor = [UIColor performSelector:graySelector];
+				}
+				glyph = [glyph performSelector:tintSelector withObject:glyphColor withObject:(id)UIImageRenderingModeAlwaysOriginal];
 				CGFloat glyphSize = WFSAppIconSize * 0.52;
 				[glyph drawInRect:CGRectMake((WFSAppIconSize - glyphSize) / 2.0, (WFSAppIconSize - glyphSize) / 2.0, glyphSize, glyphSize)];
 			}
-		}];
+		}
+		placeholder = UIGraphicsGetImageFromCurrentImageContext();
+		UIGraphicsEndImageContext();
 	});
 	return placeholder;
 }
@@ -60,7 +87,12 @@ static const CGFloat WFSAppIconCornerRadius = 10;
 		_appIconView.layer.cornerRadius = WFSAppIconCornerRadius;
 		_appIconView.layer.masksToBounds = YES;
 		_appIconView.layer.borderWidth = 0.5;
-		_appIconView.layer.borderColor = [UIColor separatorColor].CGColor;
+		_appIconView.layer.borderColor = [UIColor colorWithWhite:0.65 alpha:0.5].CGColor;
+		SEL separatorSelector = NSSelectorFromString(@"separatorColor");
+		if ([UIColor respondsToSelector:separatorSelector])
+		{
+			_appIconView.layer.borderColor = [UIColor performSelector:separatorSelector].CGColor;
+		}
 		[self.contentView addSubview:_appIconView];
 	}
 	return self;
@@ -167,8 +199,13 @@ static NSString* const WFSPurchasedCellIdentifier = @"WFSPurchasedCellIdentifier
 
 	self.accountLabel = [[UILabel alloc] initWithFrame:CGRectMake(16, 10, width - 32, 20)];
 	self.accountLabel.autoresizingMask = UIViewAutoresizingFlexibleWidth;
-	self.accountLabel.font = [UIFont systemFontOfSize:14 weight:UIFontWeightMedium];
-	self.accountLabel.textColor = [UIColor secondaryLabelColor];
+	self.accountLabel.font = [UIFont systemFontOfSize:14];
+	SEL weightedFontSelector = NSSelectorFromString(@"systemFontOfSize:weight:");
+	if ([UIFont respondsToSelector:weightedFontSelector])
+	{
+		self.accountLabel.font = [UIFont systemFontOfSize:14 weight:UIFontWeightMedium];
+	}
+	self.accountLabel.textColor = WFSSecondaryLabelColor();
 	self.accountLabel.text = @"Checking signed-in Apple ID…";
 	[header addSubview:self.accountLabel];
 
@@ -176,7 +213,12 @@ static NSString* const WFSPurchasedCellIdentifier = @"WFSPurchasedCellIdentifier
 	self.filterControl.frame = CGRectMake(16, 36, width - 32, 32);
 	self.filterControl.autoresizingMask = UIViewAutoresizingFlexibleWidth;
 	self.filterControl.selectedSegmentIndex = 0;
-	NSDictionary* segmentFont = @{NSFontAttributeName: [UIFont systemFontOfSize:14 weight:UIFontWeightSemibold]};
+	NSDictionary* segmentFont = @{NSFontAttributeName: [UIFont systemFontOfSize:14]};
+	SEL weightedSegmentFontSelector = NSSelectorFromString(@"systemFontOfSize:weight:");
+	if ([UIFont respondsToSelector:weightedSegmentFontSelector])
+	{
+		segmentFont = @{NSFontAttributeName: [UIFont systemFontOfSize:14 weight:UIFontWeightSemibold]};
+	}
 	[self.filterControl setTitleTextAttributes:segmentFont forState:UIControlStateNormal];
 	[self.filterControl setTitleTextAttributes:segmentFont forState:UIControlStateSelected];
 	[self.filterControl addTarget:self action:@selector(filterChanged) forControlEvents:UIControlEventValueChanged];
@@ -184,14 +226,14 @@ static NSString* const WFSPurchasedCellIdentifier = @"WFSPurchasedCellIdentifier
 
 	UIView* statusView = [[UIView alloc] initWithFrame:CGRectMake(16, 74, width - 32, 26)];
 	statusView.autoresizingMask = UIViewAutoresizingFlexibleWidth;
-	self.spinner = [[UIActivityIndicatorView alloc] initWithActivityIndicatorStyle:UIActivityIndicatorViewStyleMedium];
+	self.spinner = [[UIActivityIndicatorView alloc] initWithActivityIndicatorStyle:UIActivityIndicatorViewStyleGray];
 	self.spinner.frame = CGRectMake(0, 0, 24, 24);
 	[statusView addSubview:self.spinner];
 
 	self.statusLabel = [[UILabel alloc] initWithFrame:CGRectMake(28, 2, statusView.bounds.size.width - 28, 22)];
 	self.statusLabel.autoresizingMask = UIViewAutoresizingFlexibleWidth;
 	self.statusLabel.font = [UIFont systemFontOfSize:13];
-	self.statusLabel.textColor = [UIColor secondaryLabelColor];
+	self.statusLabel.textColor = WFSSecondaryLabelColor();
 	self.statusLabel.numberOfLines = 2;
 	[statusView addSubview:self.statusLabel];
 
@@ -287,7 +329,7 @@ static NSString* const WFSPurchasedCellIdentifier = @"WFSPurchasedCellIdentifier
 		self.accountLabel.text = [NSString stringWithFormat:@"Signed in as: %@", accountName.length ? accountName : @"Apple ID"];
 		self.statusLabel.hidden = NO;
 		self.statusLabel.text = @"Loading purchases…";
-		self.statusLabel.textColor = [UIColor secondaryLabelColor];
+		self.statusLabel.textColor = WFSSecondaryLabelColor();
 		[self setLoading:YES];
 
 		long long dsid = 0;
@@ -465,7 +507,7 @@ static NSString* const WFSPurchasedCellIdentifier = @"WFSPurchasedCellIdentifier
 	}
 	self.statusLabel.hidden = NO;
 	self.statusLabel.text = @"Loading Apple ID purchase history…";
-	self.statusLabel.textColor = [UIColor secondaryLabelColor];
+	self.statusLabel.textColor = WFSSecondaryLabelColor();
 	__weak typeof(self) weakSelf = self;
 	[self fetchCommerceYearsFromYear:2008 toYear:[self currentYear] purchases:[NSMutableArray array] completion:^(NSArray* purchases, NSError* error)
 	{

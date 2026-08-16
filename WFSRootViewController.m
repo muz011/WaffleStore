@@ -20,9 +20,9 @@ typedef struct __WFSSecTask* WFSSecTaskRef;
 extern WFSSecTaskRef SecTaskCreateFromSelf(CFAllocatorRef allocator);
 extern CFTypeRef SecTaskCopyValueForEntitlement(WFSSecTaskRef task, CFStringRef entitlement, CFErrorRef* error);
 
-extern int posix_spawnattr_set_persona_np(const posix_spawnattr_t* __restrict attrs, uid_t persona_id, uint32_t flags);
-extern int posix_spawnattr_set_persona_uid_np(const posix_spawnattr_t* __restrict attrs, uid_t uid);
-extern int posix_spawnattr_set_persona_gid_np(const posix_spawnattr_t* __restrict attrs, gid_t gid);
+extern int posix_spawnattr_set_persona_np(const posix_spawnattr_t* __restrict attrs, uid_t persona_id, uint32_t flags) __attribute__((weak_import));
+extern int posix_spawnattr_set_persona_uid_np(const posix_spawnattr_t* __restrict attrs, uid_t uid) __attribute__((weak_import));
+extern int posix_spawnattr_set_persona_gid_np(const posix_spawnattr_t* __restrict attrs, gid_t gid) __attribute__((weak_import));
 
 #define WFS_PERSONA_FLAGS_OVERRIDE 1
 
@@ -30,6 +30,26 @@ typedef int (*WFSJBInitFn)(void);
 typedef int (*WFSJBClientCloseFn)(void);
 typedef int (*WFSJBClientSpawnFn)(uid_t uid, gid_t gid, int argc, char** argv, void (^callback)(pid_t pid));
 typedef int (*WFSJBPersonaFixFn)(int childPid, uid_t overwriteUid, gid_t overwriteGid);
+
+static UIColor* WFSGray5Color(void)
+{
+	UIColor* color = [UIColor colorWithWhite:0.9 alpha:1.0];
+	SEL selector = NSSelectorFromString(@"systemGray5Color");
+	if ([UIColor respondsToSelector:selector])
+	{
+		color = [UIColor performSelector:selector];
+	}
+	return color;
+}
+
+static UIActivityIndicatorViewStyle WFSSpinnerStyle(void)
+{
+	if (@available(iOS 13.0, *))
+	{
+		return (UIActivityIndicatorViewStyle)100;
+	}
+	return UIActivityIndicatorViewStyleGray;
+}
 
 static NSNumber* wfsEffectiveEntitlement(NSString* key)
 {
@@ -409,9 +429,12 @@ static NSInteger WFSSpawnRootWithTimeout(NSArray* arguments, NSString* logFilePa
 		}
 		posix_spawnattr_t attributes;
 		posix_spawnattr_init(&attributes);
-		posix_spawnattr_set_persona_np(&attributes, 99, WFS_PERSONA_FLAGS_OVERRIDE);
-		posix_spawnattr_set_persona_uid_np(&attributes, 501);
-		posix_spawnattr_set_persona_gid_np(&attributes, 501);
+		if (posix_spawnattr_set_persona_np && posix_spawnattr_set_persona_uid_np && posix_spawnattr_set_persona_gid_np)
+		{
+			posix_spawnattr_set_persona_np(&attributes, 99, WFS_PERSONA_FLAGS_OVERRIDE);
+			posix_spawnattr_set_persona_uid_np(&attributes, 501);
+			posix_spawnattr_set_persona_gid_np(&attributes, 501);
+		}
 		posix_spawnattr_setflags(&attributes, POSIX_SPAWN_START_SUSPENDED);
 		pid_t pid = 0;
 		int spawnResult = posix_spawn(&pid, argv[0], NULL, &attributes, argv, NULL);
@@ -477,9 +500,12 @@ static NSInteger WFSSpawnRootWithTimeout(NSArray* arguments, NSString* logFilePa
 	start = [NSProcessInfo processInfo].systemUptime;
 	posix_spawnattr_t attributes;
 	posix_spawnattr_init(&attributes);
-	posix_spawnattr_set_persona_np(&attributes, 99, WFS_PERSONA_FLAGS_OVERRIDE);
-	posix_spawnattr_set_persona_uid_np(&attributes, 0);
-	posix_spawnattr_set_persona_gid_np(&attributes, 0);
+	if (posix_spawnattr_set_persona_np && posix_spawnattr_set_persona_uid_np && posix_spawnattr_set_persona_gid_np)
+	{
+		posix_spawnattr_set_persona_np(&attributes, 99, WFS_PERSONA_FLAGS_OVERRIDE);
+		posix_spawnattr_set_persona_uid_np(&attributes, 0);
+		posix_spawnattr_set_persona_gid_np(&attributes, 0);
+	}
 	pid_t pid = 0;
 	int spawnResult = posix_spawn(&pid, argv[0], NULL, &attributes, argv, NULL);
 	posix_spawnattr_destroy(&attributes);
@@ -892,7 +918,7 @@ static NSInteger WFSSpawnRootWithTimeout(NSArray* arguments, NSString* logFilePa
 			return;
 		}
 		self.progressAlert = [UIAlertController alertControllerWithTitle:@"Downloading" message:message preferredStyle:UIAlertControllerStyleAlert];
-		UIActivityIndicatorView* indicator = [[UIActivityIndicatorView alloc] initWithActivityIndicatorStyle:UIActivityIndicatorViewStyleMedium];
+		UIActivityIndicatorView* indicator = [[UIActivityIndicatorView alloc] initWithActivityIndicatorStyle:WFSSpinnerStyle()];
 		indicator.translatesAutoresizingMaskIntoConstraints = NO;
 		indicator.tag = 4242;
 		[indicator startAnimating];
@@ -929,7 +955,7 @@ static NSInteger WFSSpawnRootWithTimeout(NSArray* arguments, NSString* logFilePa
 			return;
 		}
 		self.progressAlert = [UIAlertController alertControllerWithTitle:@"Installing" message:message preferredStyle:UIAlertControllerStyleAlert];
-		UIActivityIndicatorView* indicator = [[UIActivityIndicatorView alloc] initWithActivityIndicatorStyle:UIActivityIndicatorViewStyleMedium];
+		UIActivityIndicatorView* indicator = [[UIActivityIndicatorView alloc] initWithActivityIndicatorStyle:WFSSpinnerStyle()];
 		indicator.translatesAutoresizingMaskIntoConstraints = NO;
 		indicator.tag = 4242;
 		[indicator startAnimating];
@@ -1009,7 +1035,7 @@ static NSInteger WFSSpawnRootWithTimeout(NSArray* arguments, NSString* logFilePa
 	progress.translatesAutoresizingMaskIntoConstraints = NO;
 	progress.tintColor = [UIColor systemBlueColor];
 	progress.progressTintColor = [UIColor systemBlueColor];
-	progress.trackTintColor = [UIColor systemGray5Color];
+	progress.trackTintColor = WFSGray5Color();
 	progress.progress = 0.0f;
 	[alert.view addSubview:progress];
 	[NSLayoutConstraint activateConstraints:@[
@@ -1072,7 +1098,7 @@ static NSInteger WFSSpawnRootWithTimeout(NSArray* arguments, NSString* logFilePa
 		progress.translatesAutoresizingMaskIntoConstraints = NO;
 		progress.tintColor = [UIColor systemBlueColor];
 		progress.progressTintColor = [UIColor systemBlueColor];
-		progress.trackTintColor = [UIColor systemGray5Color];
+		progress.trackTintColor = WFSGray5Color();
 		[alert.view addSubview:progress];
 		[NSLayoutConstraint activateConstraints:@[
 			[progress.centerXAnchor constraintEqualToAnchor:alert.view.centerXAnchor],
@@ -1271,6 +1297,17 @@ static NSInteger WFSSpawnRootWithTimeout(NSArray* arguments, NSString* logFilePa
 		[self showAlert:@"No Internet" message:@"Please check your internet connection and try again."];
 		return;
 	}
+	Class itemOfferClass = NSClassFromString(@"SKUIItemOffer");
+	Class itemClass = NSClassFromString(@"SKUIItem");
+	Class centerClass = NSClassFromString(@"SKUIItemStateCenter");
+	Class clientContextClass = NSClassFromString(@"SKUIClientContext");
+	if (!itemOfferClass || !itemClass || !centerClass || !clientContextClass ||
+		![centerClass respondsToSelector:@selector(defaultCenter)] ||
+		![clientContextClass respondsToSelector:@selector(defaultContext)])
+	{
+		[self showAlert:@"StoreKit Unavailable" message:@"The StoreKit purchase flow is not available on this iOS version. Use Apple ID download instead."];
+		return;
+	}
 	[self showDownloadProgressWithMessage:@"Initiating download…"];
 	NSString* adamId = [NSString stringWithFormat:@"%lld", appId];
 	NSString* pricingParameters = @"pricingParameter";
@@ -1287,20 +1324,20 @@ static NSInteger WFSSpawnRootWithTimeout(NSArray* arguments, NSString* logFilePa
 	}
 	NSDictionary* offerDict = @{@"buyParams": offerString};
 	NSDictionary* itemDict = @{@"_itemOffer": adamId};
-	SKUIItemOffer* offer = [[SKUIItemOffer alloc] initWithLookupDictionary:offerDict];
-	SKUIItem* item = [[SKUIItem alloc] initWithLookupDictionary:itemDict];
+	SKUIItemOffer* offer = [[itemOfferClass alloc] initWithLookupDictionary:offerDict];
+	SKUIItem* item = [[itemClass alloc] initWithLookupDictionary:itemDict];
 	[item setValue:offer forKey:@"_itemOffer"];
 	[item setValue:@"iosSoftware" forKey:@"_itemKindString"];
 	if (versionId != 0)
 	{
 		[item setValue:@(versionId) forKey:@"_versionIdentifier"];
 	}
-	SKUIItemStateCenter* center = [SKUIItemStateCenter defaultCenter];
+	SKUIItemStateCenter* center = [centerClass defaultCenter];
 	NSArray* items = @[item];
 	dispatch_async(dispatch_get_main_queue(), ^
 	{
 		[self showDownloadProgressWithMessage:@"Purchase request sent. The download will begin in the background."];
-		[center _performPurchases:[center _newPurchasesWithItems:items] hasBundlePurchase:0 withClientContext:[SKUIClientContext defaultContext] completionBlock:^(id arg1)
+		[center _performPurchases:[center _newPurchasesWithItems:items] hasBundlePurchase:0 withClientContext:[clientContextClass defaultContext] completionBlock:^(id arg1)
 		{
 			[self dismissDownloadProgress];
 		}];
