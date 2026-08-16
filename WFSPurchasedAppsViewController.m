@@ -1375,7 +1375,7 @@ static NSString* const WFSPurchasedCellIdentifier = @"WFSPurchasedCellIdentifier
 	}
 	if ([self.removedStoreIDs containsObject:@(app.storeItemID)] && self.appleIDDownloadHandler)
 	{
-		UIAlertController* removedAlert = [UIAlertController alertControllerWithTitle:title message:@"This app was removed from the App Store.\n\nDownload it directly with your Apple ID instead — the .ipa is installed automatically, no re-signing needed." preferredStyle:UIAlertControllerStyleAlert];
+		UIAlertController* removedAlert = [UIAlertController alertControllerWithTitle:title message:@"This app was removed from the App Store.\n\nDownload it directly with your Apple ID instead — the .ipa is saved so you can install it with Filza or TrollStore." preferredStyle:UIAlertControllerStyleAlert];
 		__weak typeof(self) weakSelf = self;
 		[removedAlert addAction:[UIAlertAction actionWithTitle:@"Download with Apple ID" style:UIAlertActionStyleDefault handler:^(UIAlertAction* action)
 		{

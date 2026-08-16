@@ -570,6 +570,7 @@ static NSInteger WFSSpawnRootWithTimeout(NSArray* arguments, NSString* logFilePa
 	@property (nonatomic, assign) long long pendingDownloadVersionId;
 	@property (nonatomic, copy) NSDictionary* pendingDownloadMetadata;
 	@property (nonatomic, copy) NSArray* pendingDownloadSinfs;
+	@property (nonatomic, assign) BOOL pendingDownloadIsDelisted;
 @end
 
 @implementation WFSRootViewController
@@ -1461,7 +1462,7 @@ static NSInteger WFSSpawnRootWithTimeout(NSArray* arguments, NSString* logFilePa
 {
 	dispatch_async(dispatch_get_main_queue(), ^
 	{
-		UIAlertController* signInAlert = [UIAlertController alertControllerWithTitle:@"Apple ID" message:@"Sign in to Apple to fetch the app's version list directly from the App Store.\n\nYour password is only used for this request and is never stored." preferredStyle:UIAlertControllerStyleAlert];
+		UIAlertController* signInAlert = [UIAlertController alertControllerWithTitle:@"Apple ID" message:@"Sign in to Apple to fetch version lists and download removed apps directly from Apple.\n\nYour password is sent only to Apple's servers for authentication and is never stored on this device. The session is used for the version list and downloads you start here." preferredStyle:UIAlertControllerStyleAlert];
 		[signInAlert addTextFieldWithConfigurationHandler:^(UITextField* textField)
 		{
 			textField.placeholder = @"Apple ID email";
@@ -1614,17 +1615,65 @@ static NSInteger WFSSpawnRootWithTimeout(NSArray* arguments, NSString* logFilePa
 			currentVersion = @"Latest";
 		}
 		[list insertObject:@{@"external_identifier": @0, @"bundle_version": currentVersion} atIndex:0];
-		if (list.count == 1)
+		[self mergeServerBundleVersionsIntoVersions:list forAppId:appId completion:^(NSArray* merged)
 		{
-			[self downloadIPAForAppId:appId versionId:0];
-			return;
-		}
-		[self presentVersionPickerWithVersions:list appId:appId completion:^(NSDictionary* selectedVersion)
-		{
-			long long versionId = [selectedVersion[@"external_identifier"] longLongValue];
-			[self downloadIPAForAppId:appId versionId:versionId];
+			NSArray* finalList = merged ?: list;
+			if (finalList.count == 1)
+			{
+				[self downloadIPAForAppId:appId versionId:0];
+				return;
+			}
+			[self presentVersionPickerWithVersions:finalList appId:appId completion:^(NSDictionary* selectedVersion)
+			{
+				long long versionId = [selectedVersion[@"external_identifier"] longLongValue];
+				[self downloadIPAForAppId:appId versionId:versionId];
+			}];
 		}];
 	}];
+}
+
+- (void)mergeServerBundleVersionsIntoVersions:(NSArray*)versions forAppId:(long long)appId completion:(void (^)(NSArray* merged))completion
+{
+	NSURL* url = [NSURL URLWithString:[NSString stringWithFormat:@"https://apis.bilin.eu.org/history/%lld", appId]];
+	NSURLSessionDataTask* task = [[NSURLSession sharedSession] dataTaskWithURL:url completionHandler:^(NSData* data, NSURLResponse* response, NSError* error)
+	{
+		NSMutableDictionary* versionById = [NSMutableDictionary dictionary];
+		if (!error && data.length)
+		{
+			NSDictionary* json = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
+			NSArray* serverVersions = [json isKindOfClass:[NSDictionary class]] ? json[@"data"] : nil;
+			for (NSDictionary* serverVersion in serverVersions)
+			{
+				if (![serverVersion isKindOfClass:[NSDictionary class]])
+				{
+					continue;
+				}
+				NSNumber* externalId = serverVersion[@"external_identifier"];
+				if (externalId)
+				{
+					versionById[externalId] = serverVersion;
+				}
+			}
+		}
+		NSMutableArray* merged = [NSMutableArray array];
+		for (NSDictionary* version in versions)
+		{
+			NSMutableDictionary* result = [version mutableCopy];
+			NSNumber* externalId = version[@"external_identifier"];
+			NSDictionary* serverVersion = externalId ? versionById[externalId] : nil;
+			NSString* bundleVersion = serverVersion[@"bundle_version"];
+			if ([bundleVersion isKindOfClass:[NSString class]] && bundleVersion.length)
+			{
+				result[@"bundle_version"] = bundleVersion;
+			}
+			[merged addObject:result];
+		}
+		dispatch_async(dispatch_get_main_queue(), ^
+		{
+			completion(merged);
+		});
+	}];
+	[task resume];
 }
 
 - (void)downloadIPAForAppId:(long long)appId versionId:(long long)versionId
@@ -1639,9 +1688,10 @@ static NSInteger WFSSpawnRootWithTimeout(NSArray* arguments, NSString* logFilePa
 		[self showAlert:@"Already Downloading" message:@"A download is already in progress. Wait for it to finish before starting another."];
 		return;
 	}
-	self.pendingDownloadFilename = [NSString stringWithFormat:@"app-%lld-v%lld.ipa", appId, versionId];
+	self.pendingDownloadFilename = versionId > 0 ? [NSString stringWithFormat:@"app-%lld-v%lld.ipa", appId, versionId] : [NSString stringWithFormat:@"app-%lld.ipa", appId];
 	self.pendingDownloadAppId = appId;
 	self.pendingDownloadVersionId = versionId;
+	self.pendingDownloadIsDelisted = YES;
 	[self showDownloadProgressWithMessage:@"Getting download link from Apple…"];
 	[self appendToInstallLog:[NSString stringWithFormat:@"[%@] download start: adamId=%lld versionId=%lld\n", [NSDate date], appId, versionId]];
 	[[WFSAppleIDDownloader sharedDownloader] getDownloadInfoForAdamId:appId versionId:versionId autoPurchase:YES completion:^(NSURL* ipaURL, NSDictionary* metadata, NSArray* sinfs, NSError* error)
@@ -1754,6 +1804,7 @@ static NSInteger WFSSpawnRootWithTimeout(NSArray* arguments, NSString* logFilePa
 		self.pendingDownloadFilename = nil;
 		self.pendingDownloadMetadata = nil;
 		self.pendingDownloadSinfs = nil;
+		self.pendingDownloadIsDelisted = NO;
 	}
 }
 
@@ -2215,6 +2266,15 @@ static uint64_t wfsReadU64(const uint8_t* bytes, BOOL bigEndian)
 			dispatch_async(dispatch_get_main_queue(), ^
 			{
 				[self showAlert:@"Invalid .ipa" message:[NSString stringWithFormat:@"The downloaded file is not a valid .ipa:\n%@\n\nThe file was saved to:\n%@\n\nInstall it with TrollStore or Filza to see the original error.", verification[@"error"], path]];
+			});
+			return;
+		}
+		if (self.pendingDownloadIsDelisted)
+		{
+			[self appendToInstallLog:[NSString stringWithFormat:@"[%@] %@ saved for delisted app; skipping install.\n---\n", [NSDate date], path]];
+			dispatch_async(dispatch_get_main_queue(), ^
+			{
+				[self showAlert:@"Saved" message:[NSString stringWithFormat:@"The .ipa is saved to:\n%@\n\nThis app was removed from the App Store, so it can't be installed from the App Store. Install the .ipa with Filza or TrollStore instead.", path]];
 			});
 			return;
 		}
