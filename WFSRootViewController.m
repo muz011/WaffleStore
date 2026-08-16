@@ -688,24 +688,29 @@ static NSInteger WFSSpawnRootWithTimeout(NSArray* arguments, NSString* logFilePa
 	NSDictionary* infoPlist = [NSDictionary dictionaryWithContentsOfFile:[bundleURL.path stringByAppendingPathComponent:@"Info.plist"]];
 	NSString* bundleId = infoPlist[@"CFBundleIdentifier"];
 	NSURL* url = [NSURL URLWithString:[NSString stringWithFormat:@"https://itunes.apple.com/lookup?bundleId=%@&limit=1&media=software", bundleId]];
-	NSURLRequest* request = [NSURLRequest requestWithURL:url];
+	NSMutableURLRequest* request = [NSMutableURLRequest requestWithURL:url];
+	[request setValue:@"application/json" forHTTPHeaderField:@"Accept"];
 	NSURLSessionDataTask* task = [[NSURLSession sharedSession] dataTaskWithRequest:request completionHandler:^(NSData* data, NSURLResponse* response, NSError* error)
 	{
 		if (error)
 		{
+			[self appendToInstallLog:[NSString stringWithFormat:@"[%@] iTunes lookup network error: %@\n", [NSDate date], error.localizedDescription]];
 			dispatch_async(dispatch_get_main_queue(), ^
 			{
 				[self showAlert:@"Error" message:error.localizedDescription];
 			});
 			return;
 		}
+		NSHTTPURLResponse* httpResponse = [response isKindOfClass:[NSHTTPURLResponse class]] ? (NSHTTPURLResponse*)response : nil;
+		NSInteger statusCode = httpResponse ? httpResponse.statusCode : 0;
 		NSError* jsonError = nil;
 		NSDictionary* json = [NSJSONSerialization JSONObjectWithData:data options:0 error:&jsonError];
-		if (jsonError)
+		if (jsonError || ![json isKindOfClass:[NSDictionary class]])
 		{
+			[self appendToInstallLog:[NSString stringWithFormat:@"[%@] iTunes lookup bad response for bundle %@: HTTP %ld, %lu bytes: %@\n", [NSDate date], bundleId, (long)statusCode, (unsigned long)data.length, jsonError ? jsonError.localizedDescription : @"not a dictionary"]];
 			dispatch_async(dispatch_get_main_queue(), ^
 			{
-				[self showAlert:@"JSON Error" message:jsonError.localizedDescription];
+				[self showAlert:@"Error" message:[NSString stringWithFormat:@"App Store lookup failed (HTTP %ld, %lu bytes). You can try downloading via Apple ID instead.", (long)statusCode, (unsigned long)data.length]];
 			});
 			return;
 		}
@@ -1133,11 +1138,32 @@ static NSInteger WFSSpawnRootWithTimeout(NSArray* arguments, NSString* logFilePa
 		}
 		NSError* jsonError = nil;
 		NSDictionary* json = [NSJSONSerialization JSONObjectWithData:data options:0 error:&jsonError];
-		if (jsonError)
+		NSHTTPURLResponse* httpResponse = [response isKindOfClass:[NSHTTPURLResponse class]] ? (NSHTTPURLResponse*)response : nil;
+		NSInteger statusCode = httpResponse ? httpResponse.statusCode : 0;
+		if (jsonError || ![json isKindOfClass:[NSDictionary class]])
 		{
+			[self appendToInstallLog:[NSString stringWithFormat:@"[%@] version server bad response for appId %lld: HTTP %ld, %lu bytes: %@\n", [NSDate date], appId, (long)statusCode, (unsigned long)data.length, jsonError ? jsonError.localizedDescription : @"not a dictionary"]];
+			NSString* bodyPreview = @"";
+			if (data.length)
+			{
+				NSString* bodyString = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
+				if (bodyString.length > 300)
+				{
+					bodyString = [bodyString substringToIndex:300];
+				}
+				bodyPreview = [NSString stringWithFormat:@"\n\nResponse: %@", bodyString];
+			}
 			dispatch_async(dispatch_get_main_queue(), ^
 			{
-				[self showAlert:@"JSON Error" message:jsonError.debugDescription];
+				UIAlertController* jsonErrorAlert = [UIAlertController alertControllerWithTitle:@"Version Server Error" message:[NSString stringWithFormat:@"The version server returned an invalid response (HTTP %ld, %lu bytes).%@\n\nYou can try fetching the version list directly from Apple with your Apple ID.", (long)statusCode, (unsigned long)data.length, bodyPreview] preferredStyle:UIAlertControllerStyleAlert];
+				UIAlertAction* appleIdAction = [UIAlertAction actionWithTitle:@"Try Apple ID" style:UIAlertActionStyleDefault handler:^(UIAlertAction* action)
+				{
+					[self startAppleIDDownloadForAppId:appId];
+				}];
+				[jsonErrorAlert addAction:appleIdAction];
+				UIAlertAction* cancelAction = [UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil];
+				[jsonErrorAlert addAction:cancelAction];
+				[self wfsPresentViewController:jsonErrorAlert];
 			});
 			return;
 		}
