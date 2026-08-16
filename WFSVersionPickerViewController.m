@@ -130,7 +130,7 @@
 		uintptr_t weightBits = 0;
 		memcpy(&sizeBits, &fontSize, sizeof(CGFloat));
 		memcpy(&weightBits, &fontWeight, sizeof(CGFloat));
-		cell.textLabel.font = [UIFont performSelector:monoFontSelector withObject:(id)sizeBits withObject:(id)weightBits];
+		cell.textLabel.font = [UIFont performSelector:monoFontSelector withObject:(__bridge id)(void*)sizeBits withObject:(__bridge id)(void*)weightBits];
 	}
 	else
 	{

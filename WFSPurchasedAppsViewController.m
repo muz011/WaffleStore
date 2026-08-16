@@ -65,7 +65,7 @@ static const CGFloat WFSAppIconCornerRadius = 10;
 				{
 					glyphColor = [UIColor performSelector:graySelector];
 				}
-				glyph = [glyph performSelector:tintSelector withObject:glyphColor withObject:(id)UIImageRenderingModeAlwaysOriginal];
+				glyph = [glyph performSelector:tintSelector withObject:glyphColor withObject:(__bridge id)(void*)(uintptr_t)UIImageRenderingModeAlwaysOriginal];
 				CGFloat glyphSize = WFSAppIconSize * 0.52;
 				[glyph drawInRect:CGRectMake((WFSAppIconSize - glyphSize) / 2.0, (WFSAppIconSize - glyphSize) / 2.0, glyphSize, glyphSize)];
 			}
@@ -91,7 +91,11 @@ static const CGFloat WFSAppIconCornerRadius = 10;
 		SEL separatorSelector = NSSelectorFromString(@"separatorColor");
 		if ([UIColor respondsToSelector:separatorSelector])
 		{
-			_appIconView.layer.borderColor = [UIColor performSelector:separatorSelector].CGColor;
+			UIColor* separatorColor = [UIColor performSelector:separatorSelector];
+			if (separatorColor)
+			{
+				_appIconView.layer.borderColor = separatorColor.CGColor;
+			}
 		}
 		[self.contentView addSubview:_appIconView];
 	}
